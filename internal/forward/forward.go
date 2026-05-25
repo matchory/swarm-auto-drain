@@ -10,17 +10,47 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/textproto"
 	"sync"
 	"time"
 )
+
+// hop-by-hop headers (RFC 7230 §6.1) that an intermediary MUST strip and not
+// forward. Connection-specific headers from inbound + response are dropped.
+var hopHeaders = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailer":             true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+}
+
+func copyHeaders(dst, src http.Header) {
+	for k, vs := range src {
+		if hopHeaders[textproto.CanonicalMIMEHeaderKey(k)] {
+			continue
+		}
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
+	}
+}
 
 // Forwarder is an http.Handler that proxies inbound requests to a manager
 // replica. Used in worker mode only.
 type Forwarder struct {
 	OriginNode     string
 	FindManagerURL func() (string, error)
-	Client         *http.Client
-	Retries        int // 1 attempt + Retries extra attempts; default 0 (one attempt)
+	// OnAttemptFailure is invoked when a forwarding attempt fails (connection
+	// error or 5xx response). Wired to ManagerFinder.Invalidate so the next
+	// attempt re-probes for a healthy manager instead of hammering the cached
+	// dead one. Nil-safe.
+	OnAttemptFailure func()
+	Client           *http.Client
+	Retries          int // 1 attempt + Retries extra attempts; default 0 (one attempt)
 }
 
 func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +66,9 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		base, err := f.FindManagerURL()
 		if err != nil {
 			lastErr = err
+			if f.OnAttemptFailure != nil {
+				f.OnAttemptFailure()
+			}
 			continue
 		}
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, base+r.URL.RequestURI(), bytes.NewReader(body))
@@ -43,23 +76,28 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			continue
 		}
-		for k, vs := range r.Header {
-			for _, v := range vs {
-				req.Header.Add(k, v)
-			}
-		}
+		copyHeaders(req.Header, r.Header)
 		req.Header.Set("X-Origin-Node", f.OriginNode)
 
 		resp, err := f.Client.Do(req)
 		if err != nil {
 			lastErr = err
+			if f.OnAttemptFailure != nil {
+				f.OnAttemptFailure()
+			}
 			continue
 		}
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
+		// 5xx — treat as a failed attempt so we re-probe; we still propagate
+		// the last 5xx response if we run out of retries.
+		if resp.StatusCode >= 500 && i < attempts-1 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("upstream %d", resp.StatusCode)
+			if f.OnAttemptFailure != nil {
+				f.OnAttemptFailure()
 			}
+			continue
 		}
+		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 		resp.Body.Close()
