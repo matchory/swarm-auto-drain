@@ -1,0 +1,48 @@
+# 3-node Docker-in-Docker swarm fixture for integration testing.
+# Start: docker compose -f tests/integration/docker-compose.yml up -d
+# Stop:  docker compose -f tests/integration/docker-compose.yml down -v
+version: "3.9"
+
+services:
+  dind-mgr1:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    ports:
+      - "12375:2375"
+    networks:
+      sad-net:
+        ipv4_address: 10.99.0.11
+
+  dind-mgr2:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    ports:
+      - "12376:2375"
+    networks:
+      sad-net:
+        ipv4_address: 10.99.0.12
+
+  dind-mgr3:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    ports:
+      - "12377:2375"
+    networks:
+      sad-net:
+        ipv4_address: 10.99.0.13
+
+networks:
+  sad-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.99.0.0/24
