@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/docker/docker/errdefs"
 )
 
 // docker is the subset of internal/docker.Client that ConfigStore needs.
@@ -31,6 +33,13 @@ func (s *ConfigStore) now() time.Time {
 }
 
 func (s *ConfigStore) Acquire(ctx context.Context, holder string, ttl time.Duration) (AcquireResult, error) {
+	return s.acquire(ctx, holder, ttl, false)
+}
+
+// acquire is the recursive worker. `retried` prevents an infinite loop when a
+// peer keeps releasing the lock between our create attempt and our follow-up
+// inspect.
+func (s *ConfigStore) acquire(ctx context.Context, holder string, ttl time.Duration, retried bool) (AcquireResult, error) {
 	l := Lock{Holder: holder, AcquiredAt: s.now().UTC().Unix(), TTLSeconds: int(ttl.Seconds())}
 	data, err := json.Marshal(l)
 	if err != nil {
@@ -44,23 +53,52 @@ func (s *ConfigStore) Acquire(ctx context.Context, holder string, ttl time.Durat
 		return AcquireResult{}, fmt.Errorf("create: %w", err)
 	}
 
-	// 2. EEXIST — read the existing holder.
+	// 2. EEXIST — read existing holder.
 	existing, err := s.inspect(ctx)
 	if err != nil {
 		return AcquireResult{}, fmt.Errorf("inspect after EEXIST: %w", err)
 	}
+	if existing == nil {
+		// Vanished between create and inspect (peer released). Retry the
+		// fresh-create path once; if it disappears again we treat the slot
+		// as contested rather than spin forever.
+		if retried {
+			return AcquireResult{Status: HeldByOther, Current: nil}, nil
+		}
+		return s.acquire(ctx, holder, ttl, true)
+	}
 
-	// 3. Same holder retrying? Treat as success (idempotent re-acquire).
-	if existing != nil && existing.Holder == holder {
+	// 3. Same holder retrying — idempotent re-acquire.
+	if existing.Holder == holder {
 		return AcquireResult{Status: Acquired, Current: existing}, nil
 	}
 
-	// 4. Fresh and held by someone else.
-	if existing != nil && s.now().UTC().Unix()-existing.AcquiredAt <= int64(existing.TTLSeconds) {
+	// 4. Held by someone else, still fresh.
+	if s.now().UTC().Unix()-existing.AcquiredAt <= int64(existing.TTLSeconds) {
 		return AcquireResult{Status: HeldByOther, Current: existing}, nil
 	}
 
-	// 5. Stale — remove and retry create exactly once.
+	// 5. Stale steal. Re-inspect right before remove to catch the case where
+	// a peer already completed its own steal+create cycle in the gap; without
+	// this check we'd delete the peer's fresh lock and both nodes would
+	// believe they hold the cluster-wide mutex.
+	confirmed, err := s.inspect(ctx)
+	if err != nil {
+		return AcquireResult{}, fmt.Errorf("re-inspect before steal: %w", err)
+	}
+	if confirmed == nil {
+		if retried {
+			return AcquireResult{Status: HeldByOther, Current: nil}, nil
+		}
+		return s.acquire(ctx, holder, ttl, true)
+	}
+	if confirmed.Holder != existing.Holder || confirmed.AcquiredAt != existing.AcquiredAt {
+		// Lock was replaced between inspect and re-inspect. Report whoever
+		// now holds it instead of risking a wrong remove.
+		return AcquireResult{Status: HeldByOther, Current: confirmed}, nil
+	}
+
+	// 6. Confirmed stale — remove + recreate.
 	if err := s.Docker.ConfigRemove(ctx, s.ConfigName); err != nil && !isNotFound(err) {
 		return AcquireResult{}, fmt.Errorf("remove stale: %w", err)
 	}
@@ -109,18 +147,31 @@ func (s *ConfigStore) inspect(ctx context.Context) (*Lock, error) {
 	return &l, nil
 }
 
+// isNotFound checks the Docker SDK errdefs first (the canonical signal), then
+// falls back to a specific substring used by the real client's wrapper and by
+// the test fakes. The fallback is intentionally narrow to avoid mis-classifying
+// unrelated daemon errors that happen to contain the words "not found".
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
-	return strings.Contains(s, "No such config") || strings.Contains(s, "not found")
+	if errdefs.IsNotFound(err) {
+		return true
+	}
+	return strings.Contains(err.Error(), "No such config")
 }
 
+// isAlreadyExists mirrors isNotFound for the create-EEXIST path. Docker
+// returns AlreadyExists as a Conflict per errdefs; the substring fallback
+// matches the gRPC-style ("AlreadyExists") and daemon-style ("name conflicts")
+// renderings.
 func isAlreadyExists(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errdefs.IsConflict(err) {
+		return true
+	}
 	s := err.Error()
-	return strings.Contains(s, "name conflicts") || strings.Contains(s, "already exists") || strings.Contains(s, "AlreadyExists")
+	return strings.Contains(s, "name conflicts") || strings.Contains(s, "AlreadyExists")
 }
