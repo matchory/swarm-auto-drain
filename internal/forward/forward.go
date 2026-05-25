@@ -1,0 +1,126 @@
+// Package forward implements worker→manager request proxying via the
+// swarm overlay network.
+package forward
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// Forwarder is an http.Handler that proxies inbound requests to a manager
+// replica. Used in worker mode only.
+type Forwarder struct {
+	OriginNode     string
+	FindManagerURL func() (string, error)
+	Client         *http.Client
+	Retries        int // 1 attempt + Retries extra attempts; default 0 (one attempt)
+}
+
+func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	attempts := f.Retries + 1
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		base, err := f.FindManagerURL()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, base+r.URL.RequestURI(), bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for k, vs := range r.Header {
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+		req.Header.Set("X-Origin-Node", f.OriginNode)
+
+		resp, err := f.Client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		resp.Body.Close()
+		return
+	}
+	http.Error(w, fmt.Sprintf("no manager available: %v", lastErr), http.StatusServiceUnavailable)
+}
+
+// ManagerFinder discovers manager replicas via DNS lookup of the
+// service's overlay DNS name, then probes /role on each to find ones in
+// manager mode. Results are cached.
+type ManagerFinder struct {
+	ServiceDNS string
+	Port       int
+	Client     *http.Client
+	TTL        time.Duration
+
+	mu       sync.Mutex
+	cached   string
+	cachedAt time.Time
+}
+
+var ErrNoManager = errors.New("no manager replica found")
+
+func (m *ManagerFinder) Find() (string, error) {
+	m.mu.Lock()
+	if m.cached != "" && time.Since(m.cachedAt) < m.TTL {
+		c := m.cached
+		m.mu.Unlock()
+		return c, nil
+	}
+	m.mu.Unlock()
+
+	ips, err := net.LookupIP(m.ServiceDNS)
+	if err != nil {
+		return "", fmt.Errorf("lookup %s: %w", m.ServiceDNS, err)
+	}
+	for _, ip := range ips {
+		base := fmt.Sprintf("http://%s:%d", ip.String(), m.Port)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, "GET", base+"/role", nil)
+		resp, err := m.Client.Do(req)
+		cancel()
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == 200 && bytes.Contains(body, []byte(`"manager"`)) {
+			m.mu.Lock()
+			m.cached, m.cachedAt = base, time.Now()
+			m.mu.Unlock()
+			return base, nil
+		}
+	}
+	return "", ErrNoManager
+}
+
+// Invalidate clears the cache so the next Find call re-probes.
+func (m *ManagerFinder) Invalidate() {
+	m.mu.Lock()
+	m.cached = ""
+	m.mu.Unlock()
+}
