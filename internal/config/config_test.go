@@ -16,8 +16,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.NodeHostname != "test-node" {
 		t.Errorf("NodeHostname = %q, want test-node", c.NodeHostname)
 	}
-	if c.ListenAddr != "127.0.0.1:7777" {
-		t.Errorf("ListenAddr = %q, want 127.0.0.1:7777", c.ListenAddr)
+	if c.ListenAddr != "0.0.0.0:7777" {
+		t.Errorf("ListenAddr = %q, want 0.0.0.0:7777", c.ListenAddr)
 	}
 	if c.DockerSocket != "/var/run/docker.sock" {
 		t.Errorf("DockerSocket = %q", c.DockerSocket)

@@ -30,7 +30,10 @@ services:
         failure_action: rollback
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
-      LISTEN_ADDR: "127.0.0.1:7777"
+      # 0.0.0.0 in-container so the overlay-network interface is reachable
+      # from peer replicas (worker→manager forwarding). The published port
+      # below restricts host-side reachability to loopback via host_ip.
+      LISTEN_ADDR: "0.0.0.0:7777"
       LOCK_TTL_SECONDS: "1800"
       DRAIN_TIMEOUT_SECONDS: "300"
       ROLE_RECHECK_SECONDS: "30"
@@ -41,7 +44,8 @@ services:
       - target: 7777
         published: 7777
         protocol: tcp
-        mode: host                # bind to 127.0.0.1 on each host
+        mode: host                # bypass routing mesh; expose on host directly
+        host_ip: 127.0.0.1        # only host-side loopback (root-on-host trust)
     volumes:
       - type: bind
         source: /var/run/docker.sock

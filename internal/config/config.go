@@ -27,7 +27,7 @@ type Config struct {
 func Load() (*Config, error) {
 	c := &Config{
 		NodeHostname:   os.Getenv("NODE_HOSTNAME"),
-		ListenAddr:     envStr("LISTEN_ADDR", "127.0.0.1:7777"),
+		ListenAddr:     envStr("LISTEN_ADDR", "0.0.0.0:7777"),
 		DockerSocket:   envStr("DOCKER_SOCKET", "/var/run/docker.sock"),
 		LockConfigName: envStr("LOCK_CONFIG_NAME", "swarm-auto-drain-lock"),
 		LogLevel:       envStr("LOG_LEVEL", "info"),

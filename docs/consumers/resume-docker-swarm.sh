@@ -22,7 +22,11 @@ if ! curl -sf --max-time 5 "$COORDINATOR/healthz" >/dev/null; then
 fi
 
 # 2. Set self active. Idempotent — succeeds even if already active.
-curl -sf -X POST --max-time 60 "$COORDINATOR/active"
+code=$(curl -s -X POST --max-time 60 -o /dev/null -w '%{http_code}' "$COORDINATOR/active")
+if [ "$code" != "200" ]; then
+  echo "unexpected code $code on /active"
+  exit 1
+fi
 
 # 3. Release the lock. The coordinator verifies we are the holder; a 403
 #    means a peer stole the lock as stale during our outage, which is the

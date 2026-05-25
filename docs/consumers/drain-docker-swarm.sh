@@ -10,24 +10,38 @@ exec > >(logger -t swarm-auto-drain-drain) 2>&1
 
 COORDINATOR=http://127.0.0.1:7777
 
+# Capture the HTTP code separately from the body so curl exit status only
+# reflects transport errors, not application 4xx/5xx. (Avoid `curl -f`, which
+# under `set -e` would kill the script before we can map 409/408/503 to a
+# graceful "defer this run" branch.)
+http_post() {
+  curl -s -X POST --max-time "$2" -o /dev/null -w '%{http_code}' "$1"
+}
+
 # 1. Acquire the cluster-wide lock.
-resp=$(curl -sf -X POST --max-time 60 -w '\n%{http_code}' "$COORDINATOR/lock")
-code=${resp##*$'\n'}
+code=$(http_post "$COORDINATOR/lock" 60)
 case "$code" in
   201|410) echo "lock acquired (code=$code)" ;;
   409)     echo "lock held by another node — deferring this run"; exit 0 ;;
-  *)       echo "coordinator returned unexpected code $code"; exit 1 ;;
+  000)     echo "coordinator unreachable"; exit 1 ;;
+  *)       echo "coordinator returned unexpected code $code on /lock"; exit 1 ;;
 esac
 
-# 2. Best-effort release if anything below fails.
+# 2. Best-effort release if anything below fails before we touch the sentinel.
 release() {
-  curl -sf -X DELETE --max-time 30 "$COORDINATOR/lock" || true
+  curl -s -X DELETE --max-time 30 -o /dev/null "$COORDINATOR/lock" || true
 }
 trap 'release; exit 1' ERR
 
 # 3. Drain — coordinator handles manager-quorum guard internally.
-curl -sf -X POST --max-time 600 "$COORDINATOR/drain"
-echo "drain complete"
+code=$(http_post "$COORDINATOR/drain" 600)
+case "$code" in
+  200) echo "drain complete" ;;
+  408) echo "drain timed out — aborting, leaving allocation drained for operator triage"; trap - ERR; release; exit 1 ;;
+  503) echo "drain refused (manager quorum) — deferring this run"; trap - ERR; release; exit 0 ;;
+  000) echo "coordinator unreachable mid-drain"; exit 1 ;;
+  *)   echo "unexpected code $code on /drain"; exit 1 ;;
+esac
 
 # 4. Sentinel + reboot.
 trap - ERR
