@@ -12,6 +12,7 @@ type fakeNode struct {
 	Role         string
 	Reachability string
 	Availability string
+	Leader       bool
 }
 
 type fakeDocker struct {
@@ -34,6 +35,7 @@ func (f *fakeDocker) NodeList(_ context.Context, filters map[string][]string) ([
 		out = append(out, NodeSummary{
 			Hostname: n.Hostname, Role: n.Role,
 			Reachability: n.Reachability, Availability: n.Availability,
+			Leader: n.Leader,
 		})
 	}
 	return out, nil
@@ -135,6 +137,23 @@ func TestActivate(t *testing.T) {
 	}
 	if len(f.updateCalls) != 1 || f.updateCalls[0] != "w1:active" {
 		t.Errorf("updateCalls = %v", f.updateCalls)
+	}
+}
+
+func TestManagers(t *testing.T) {
+	f := &fakeDocker{nodes: []fakeNode{
+		{Hostname: "m1", Role: "manager", Reachability: "reachable", Leader: true},
+		{Hostname: "m2", Role: "manager", Reachability: "reachable"},
+		{Hostname: "m3", Role: "manager", Reachability: "unreachable"},
+		{Hostname: "w1", Role: "worker", Reachability: ""},
+	}}
+	d := &DockerDrainer{Docker: f}
+	h, err := d.Managers(context.Background())
+	if err != nil {
+		t.Fatalf("Managers: %v", err)
+	}
+	if h.Total != 3 || h.Reachable != 2 || h.Leader != "m1" {
+		t.Errorf("Managers = %+v", h)
 	}
 }
 

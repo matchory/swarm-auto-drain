@@ -14,6 +14,7 @@ type NodeSummary struct {
 	Role         string
 	Reachability string
 	Availability string
+	Leader       bool
 }
 
 type docker interface {
@@ -66,6 +67,26 @@ func (d *DockerDrainer) QuorumOK(ctx context.Context, self string) (bool, Quorum
 	// To preserve raft quorum after self drains, OthersReachable must be >= Required.
 	ok := rep.OthersReachable >= rep.Required
 	return ok, rep, nil
+}
+
+// Managers reports total/reachable manager counts and the raft leader's
+// hostname. Computed without reference to "self" so /managers/health can be
+// scraped by external monitoring.
+func (d *DockerDrainer) Managers(ctx context.Context) (ManagersHealth, error) {
+	nodes, err := d.Docker.NodeList(ctx, map[string][]string{"role": {"manager"}})
+	if err != nil {
+		return ManagersHealth{}, fmt.Errorf("list managers: %w", err)
+	}
+	h := ManagersHealth{Total: len(nodes)}
+	for _, n := range nodes {
+		if n.Reachability == "reachable" {
+			h.Reachable++
+		}
+		if n.Leader {
+			h.Leader = n.Hostname
+		}
+	}
+	return h, nil
 }
 
 func (d *DockerDrainer) Drain(ctx context.Context, node string, timeout, pollInterval time.Duration) (Result, error) {

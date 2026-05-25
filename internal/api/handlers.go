@@ -40,17 +40,24 @@ func (h Handlers) healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-func (h Handlers) role(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"role": h.Role()})
+func (h Handlers) role(w http.ResponseWriter, r *http.Request) {
+	// Per spec §3.2: {"role":"manager"|"worker","leader":"<hostname>"}.
+	// Leader is looked up via the Drainer; on transient failure (e.g. lost
+	// docker socket) we still return role with leader empty rather than 500.
+	leader := ""
+	if m, err := h.Drainer.Managers(r.Context()); err == nil {
+		leader = m.Leader
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"role": h.Role(), "leader": leader})
 }
 
 func (h Handlers) managersHealth(w http.ResponseWriter, r *http.Request) {
-	_, rep, err := h.Drainer.QuorumOK(r.Context(), "")
+	m, err := h.Drainer.Managers(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, rep)
+	writeJSON(w, http.StatusOK, m)
 }
 
 func (h Handlers) lock(w http.ResponseWriter, r *http.Request) {
@@ -62,13 +69,22 @@ func (h Handlers) lock(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// res.Current may be nil for HeldByOther in a race where the winning
+		// peer's lock vanished before we could re-inspect; respond with an
+		// empty object so clients always get well-formed JSON.
+		body := func(l *lock.Lock) any {
+			if l == nil {
+				return map[string]any{}
+			}
+			return l
+		}
 		switch res.Status {
 		case lock.Acquired:
-			writeJSON(w, http.StatusCreated, res.Current)
+			writeJSON(w, http.StatusCreated, body(res.Current))
 		case lock.AcquiredViaSteal:
-			writeJSON(w, http.StatusGone, res.Current)
+			writeJSON(w, http.StatusGone, body(res.Current))
 		case lock.HeldByOther:
-			writeJSON(w, http.StatusConflict, res.Current)
+			writeJSON(w, http.StatusConflict, body(res.Current))
 		default:
 			http.Error(w, "unknown acquire status", http.StatusInternalServerError)
 		}

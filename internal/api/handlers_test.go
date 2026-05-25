@@ -44,6 +44,8 @@ func (f *fakeStore) Inspect(_ context.Context) (*lock.Lock, error) { return f.st
 type fakeDrainer struct {
 	quorumOK    bool
 	quorumRep   drain.QuorumReport
+	managers    drain.ManagersHealth
+	managersErr error
 	drainRes    drain.Result
 	drainErr    error
 	activateErr error
@@ -51,6 +53,9 @@ type fakeDrainer struct {
 
 func (f *fakeDrainer) QuorumOK(_ context.Context, _ string) (bool, drain.QuorumReport, error) {
 	return f.quorumOK, f.quorumRep, nil
+}
+func (f *fakeDrainer) Managers(_ context.Context) (drain.ManagersHealth, error) {
+	return f.managers, f.managersErr
 }
 func (f *fakeDrainer) Drain(_ context.Context, _ string, _, _ time.Duration) (drain.Result, error) {
 	return f.drainRes, f.drainErr
@@ -84,17 +89,45 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestRole(t *testing.T) {
-	srv := newTestServer(t, &fakeStore{}, &fakeDrainer{quorumOK: true})
+	srv := newTestServer(t, &fakeStore{}, &fakeDrainer{quorumOK: true, managers: drain.ManagersHealth{Leader: "leader-host"}})
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/role")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	var body struct{ Role string }
+	var body struct {
+		Role   string `json:"role"`
+		Leader string `json:"leader"`
+	}
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	if body.Role != "manager" {
 		t.Errorf("role = %q", body.Role)
+	}
+	if body.Leader != "leader-host" {
+		t.Errorf("leader = %q", body.Leader)
+	}
+}
+
+func TestManagersHealth(t *testing.T) {
+	srv := newTestServer(t, &fakeStore{}, &fakeDrainer{
+		quorumOK: true,
+		managers: drain.ManagersHealth{Reachable: 2, Total: 3, Leader: "m1"},
+	})
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/managers/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Reachable int    `json:"reachable"`
+		Total     int    `json:"total"`
+		Leader    string `json:"leader"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Reachable != 2 || body.Total != 3 || body.Leader != "m1" {
+		t.Errorf("body = %+v", body)
 	}
 }
 
