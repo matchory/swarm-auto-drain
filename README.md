@@ -22,6 +22,47 @@ Pre-alpha. Spec under `docs/specs/`, implementation plan under `docs/plans/`.
 
 Originally extracted from internal Matchory Puppet infrastructure for the `tier: docker_swarm` case in `updates::reboot`.
 
+## Development
+
+```bash
+# Build the binary
+go build ./cmd/swarm-auto-drain
+
+# Run the test suite
+go test ./...
+
+# Build the container image
+docker build -t swarm-auto-drain:dev .
+
+# Spin up the integration test fixture
+docker compose -f tests/integration/docker-compose.yml up -d
+bash tests/integration/tests.sh
+docker compose -f tests/integration/docker-compose.yml down -v
+```
+
+## Deploying
+
+```bash
+# Pin a version (or use :latest)
+VERSION=v0.1.0 docker stack deploy -c deploy/swarm-auto-drain.stack.yml swarm-auto-drain
+
+# Verify
+docker service ls
+docker service ps swarm-auto-drain_swarm-auto-drain
+```
+
+Pre-requisite on every swarm node: `/var/lib/swarm-auto-drain/` must
+exist with mode 0755, owned by root. This is mounted into the
+coordinator container as the sentinel-state directory shared with the
+host's reboot orchestrator scripts.
+
+See [`docs/consumers/`](docs/consumers/) for reference host-side scripts.
+
+## Contributing
+
+This project is pre-alpha. PRs welcome once the first tagged release
+ships.
+
 ## License
 
 MIT.
