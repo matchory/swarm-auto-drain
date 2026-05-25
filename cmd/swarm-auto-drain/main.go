@@ -64,39 +64,59 @@ func main() {
 		PublicPaths:  []string{"/healthz", "/role"},
 	}
 
-	var handler http.Handler
-	if role.Role() == dockerpkg.RoleManager {
-		handler = mw.Wrap(handlers.Router())
-	} else {
-		mf := &forward.ManagerFinder{
-			ServiceDNS: "tasks.swarm-auto-drain",
-			Port:       7777,
-			Client:     &http.Client{Timeout: 3 * time.Second},
-			TTL:        cfg.ManagerDiscoveryTTL,
-		}
-		fwd := &forward.Forwarder{
-			OriginNode:     cfg.NodeHostname,
-			FindManagerURL: mf.Find,
-			Client:         &http.Client{Timeout: cfg.ForwardTimeout},
-			Retries:        2,
-		}
-		// /healthz and /role still answered locally so the host script's
-		// wait loop doesn't depend on a manager being reachable.
-		mux := http.NewServeMux()
-		localRouter := handlers.Router()
-		mux.HandleFunc("/healthz", localRouter.ServeHTTP)
-		mux.HandleFunc("/role", localRouter.ServeHTTP)
-		mux.Handle("/", fwd)
-		handler = mux
+	mf := &forward.ManagerFinder{
+		ServiceDNS: "tasks.swarm-auto-drain",
+		Port:       7777,
+		Client:     &http.Client{Timeout: 3 * time.Second},
+		TTL:        cfg.ManagerDiscoveryTTL,
+	}
+	fwd := &forward.Forwarder{
+		OriginNode:       cfg.NodeHostname,
+		FindManagerURL:   mf.Find,
+		OnAttemptFailure: mf.Invalidate,
+		Client:           &http.Client{Timeout: cfg.ForwardTimeout},
+		Retries:          2,
 	}
 
-	srv := &api.Server{Addr: cfg.ListenAddr, Handler: handler}
-	slog.Info("listening", "addr", cfg.ListenAddr, "role", role.Role().String())
+	// /healthz and /role are served locally on both managers and workers so
+	// the host script's wait loop doesn't depend on a manager being reachable
+	// or on the current role.
+	managerHandler := mw.Wrap(handlers.Router())
+	workerHandler := buildWorkerHandler(handlers.Router(), fwd)
+
+	// Per-request role dispatch. role.Role() is updated by the recheck
+	// goroutine, so promote/demote at runtime takes effect on the next
+	// inbound request without a restart.
+	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if role.Role() == dockerpkg.RoleManager {
+			managerHandler.ServeHTTP(w, r)
+		} else {
+			workerHandler.ServeHTTP(w, r)
+		}
+	})
+
+	srv := &api.Server{
+		Addr:          cfg.ListenAddr,
+		Handler:       router,
+		ShutdownGrace: cfg.DrainTimeout + 30*time.Second,
+	}
+	slog.Info("listening", "addr", cfg.ListenAddr, "initial_role", role.Role().String())
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("server", "err", err)
 		os.Exit(1)
 	}
 	slog.Info("shutdown complete")
+}
+
+// buildWorkerHandler routes /healthz and /role to the local handler tree (so
+// the host script can probe a worker locally) and forwards everything else
+// to a manager replica.
+func buildWorkerHandler(local http.Handler, fwd http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/healthz", local)
+	mux.Handle("/role", local)
+	mux.Handle("/", fwd)
+	return mux
 }
 
 // dockerAdapter bridges internal/docker.NodeSummary to internal/drain.NodeSummary
@@ -116,6 +136,7 @@ func (a dockerAdapter) NodeList(ctx context.Context, fs map[string][]string) ([]
 			Role:         n.Role,
 			Reachability: n.Reachability,
 			Availability: n.Availability,
+			Leader:       n.Leader,
 		}
 	}
 	return out, nil

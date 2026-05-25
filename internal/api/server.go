@@ -11,9 +11,18 @@ import (
 type Server struct {
 	Addr    string
 	Handler http.Handler
+	// ShutdownGrace bounds how long Shutdown waits for in-flight handlers to
+	// complete. Should be at least DrainTimeout + a small buffer so an
+	// in-flight POST /drain isn't truncated mid-operation on SIGTERM. Zero
+	// → 30 seconds.
+	ShutdownGrace time.Duration
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	grace := s.ShutdownGrace
+	if grace <= 0 {
+		grace = 30 * time.Second
+	}
 	srv := &http.Server{
 		Addr:              s.Addr,
 		Handler:           s.Handler,
@@ -30,10 +39,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
-		_ = srv.Shutdown(shutCtx)
-		return nil
+		return srv.Shutdown(shutCtx)
 	case err := <-errCh:
 		return err
 	}
