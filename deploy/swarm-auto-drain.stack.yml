@@ -1,0 +1,57 @@
+# swarm-auto-drain — global Swarm service for coordinated reboots.
+# Deploy:
+#   docker stack deploy -c deploy/swarm-auto-drain.stack.yml swarm-auto-drain
+#
+# Image version pinned via the VERSION env var at deploy time, e.g.:
+#   VERSION=v0.1.0 docker stack deploy -c ...
+#
+# Hosts must pre-create /var/lib/swarm-auto-drain (Puppet does this; manual
+# adopters: `sudo mkdir -p /var/lib/swarm-auto-drain && sudo chmod 0755 /var/lib/swarm-auto-drain`).
+version: "3.9"
+
+services:
+  swarm-auto-drain:
+    image: ghcr.io/matchory/swarm-auto-drain:${VERSION:-latest}
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 64M
+        reservations:
+          cpus: "0.05"
+          memory: 16M
+      update_config:
+        parallelism: 1            # one replica at a time
+        delay: 30s
+        failure_action: rollback
+    environment:
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
+      LISTEN_ADDR: "127.0.0.1:7777"
+      LOCK_TTL_SECONDS: "1800"
+      DRAIN_TIMEOUT_SECONDS: "300"
+      ROLE_RECHECK_SECONDS: "30"
+      LOG_LEVEL: "info"
+    networks:
+      - swarm-auto-drain-net
+    ports:
+      - target: 7777
+        published: 7777
+        protocol: tcp
+        mode: host                # bind to 127.0.0.1 on each host
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: /var/lib/swarm-auto-drain
+        target: /var/lib/swarm-auto-drain
+
+networks:
+  swarm-auto-drain-net:
+    driver: overlay
+    internal: true                # not reachable from outside the swarm
+    attachable: false
