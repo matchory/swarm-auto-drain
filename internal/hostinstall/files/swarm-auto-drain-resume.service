@@ -1,0 +1,14 @@
+[Unit]
+Description=swarm-auto-drain resume after coordinated reboot
+ConditionPathExists=/var/lib/swarm-auto-drain/draining
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/swarm-auto-drain
+ExecStart=/usr/local/sbin/swarm-auto-drain resume
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

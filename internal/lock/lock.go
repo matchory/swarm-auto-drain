@@ -7,9 +7,11 @@ import (
 	"time"
 )
 
+// Lock is the document stored in Docker Config that represents the cluster
+// reboot mutex.
 type Lock struct {
 	Holder     string `json:"holder"`
-	AcquiredAt int64  `json:"acquired_at"` // unix seconds UTC
+	AcquiredAt int64  `json:"acquired_at"` // Unix seconds UTC.
 	TTLSeconds int    `json:"ttl_seconds"`
 }
 
@@ -26,9 +28,10 @@ const (
 )
 
 // AcquireResult bundles Status with the current Lock state.
+// Pointer field first to keep the GC pointer-scan window minimal.
 type AcquireResult struct {
-	Status  Status
 	Current *Lock
+	Status  Status
 }
 
 // Store is the storage primitive for the lock document.
@@ -38,11 +41,13 @@ type Store interface {
 	Inspect(ctx context.Context) (*Lock, error)
 }
 
-type errStr string
+// sentinelError is a constant-friendly error type for package-level sentinels.
+type sentinelError string
 
-func (e errStr) Error() string { return string(e) }
+func (e sentinelError) Error() string { return string(e) }
 
+// Sentinel errors returned by Store implementations.
 const (
-	ErrNotHolder errStr = "lock not held by caller"
-	ErrNoLock    errStr = "no lock exists"
+	ErrNotHolder sentinelError = "lock not held by caller"
+	ErrNoLock    sentinelError = "no lock exists"
 )

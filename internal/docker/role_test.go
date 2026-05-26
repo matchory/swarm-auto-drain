@@ -16,25 +16,49 @@ type fakeClient struct {
 	info      system.Info
 	infoErr   error
 	infoCalls int
+	// NextErr, if set, is returned from any manager-only method on the next
+	// call. Used by decorator tests to inject the "not a swarm manager"
+	// error.
+	nextErr error
 }
 
-func (f *fakeClient) Info(ctx context.Context) (system.Info, error) {
+func (f *fakeClient) Info(_ context.Context) (system.Info, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.infoCalls++
 	return f.info, f.infoErr
 }
-func (f *fakeClient) Close() error                                                                    { return nil }
-func (f *fakeClient) ConfigCreate(context.Context, string, []byte, map[string]string) (string, error) { return "", nil }
-func (f *fakeClient) ConfigInspect(context.Context, string) ([]byte, map[string]string, error)        { return nil, nil, nil }
-func (f *fakeClient) ConfigRemove(context.Context, string) error                                      { return nil }
-func (f *fakeClient) NodeList(context.Context, map[string][]string) ([]NodeSummary, error)            { return nil, nil }
-func (f *fakeClient) NodeUpdate(context.Context, string, string) error                                { return nil }
-func (f *fakeClient) NodeTaskCount(context.Context, string) (int, error)                              { return 0, nil }
+func (*fakeClient) Close() error { return nil }
+func (f *fakeClient) ConfigCreate(context.Context, string, []byte, map[string]string) (string, error) {
+	return "", f.nextErr
+}
+
+func (f *fakeClient) ConfigInspect(context.Context, string) ([]byte, map[string]string, error) {
+	return nil, nil, f.nextErr
+}
+func (f *fakeClient) ConfigRemove(context.Context, string) error { return f.nextErr }
+func (f *fakeClient) NodeList(context.Context, map[string][]string) ([]NodeSummary, error) {
+	return nil, f.nextErr
+}
+func (f *fakeClient) NodeUpdate(context.Context, string, string) error   { return f.nextErr }
+func (f *fakeClient) NodeTaskCount(context.Context, string) (int, error) { return 0, f.nextErr }
+func (f *fakeClient) SelfServiceName(context.Context) (string, error)    { return "", f.nextErr }
+func (f *fakeClient) TasksByServiceWithIPs(context.Context, string) (map[string]string, error) {
+	return nil, f.nextErr
+}
+
+func (f *fakeClient) SelfAttachedNetworks(context.Context) ([]string, error) {
+	return nil, f.nextErr
+}
+
+func (f *fakeClient) NetworkInspect(context.Context, string) (NetworkSummary, error) {
+	return NetworkSummary{}, f.nextErr
+}
 
 func managerInfo() system.Info {
 	return system.Info{Swarm: swarm.Info{ControlAvailable: true, LocalNodeState: swarm.LocalNodeStateActive}}
 }
+
 func workerInfo() system.Info {
 	return system.Info{Swarm: swarm.Info{ControlAvailable: false, LocalNodeState: swarm.LocalNodeStateActive}}
 }

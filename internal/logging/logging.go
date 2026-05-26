@@ -9,17 +9,17 @@ import (
 // Setup configures slog's default logger from the given level string
 // ("debug" | "info" | "warn" | "error"). Unknown levels fall back to info.
 func Setup(level string) {
-	var l slog.Level
+	var lvl slog.Level
 	switch level {
 	case "debug":
-		l = slog.LevelDebug
+		lvl = slog.LevelDebug
 	case "warn":
-		l = slog.LevelWarn
+		lvl = slog.LevelWarn
 	case "error":
-		l = slog.LevelError
+		lvl = slog.LevelError
 	default:
-		l = slog.LevelInfo
+		lvl = slog.LevelInfo
 	}
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l})
-	slog.SetDefault(slog.New(h))
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+	slog.SetDefault(slog.New(handler))
 }

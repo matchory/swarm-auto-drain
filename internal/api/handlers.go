@@ -15,15 +15,21 @@ import (
 	"github.com/matchory/swarm-auto-drain/internal/lock"
 )
 
+// Handlers wires the HTTP handlers onto their collaborators.
+// Field order puts pointer/interface fields first to shrink the GC scan window.
 type Handlers struct {
-	Store        lock.Store
-	Drainer      drain.Drainer
+	Store   lock.Store
+	Drainer drain.Drainer
+	Role    func() string
+	// Version is the daemon binary's version string, surfaced in /role so
+	// host-side clients can detect daemon-vs-host skew. Empty when unset.
+	Version      string
 	LockTTL      time.Duration
 	DrainTimeout time.Duration
 	PollInterval time.Duration
-	Role         func() string
 }
 
+// Router returns an http.Handler mux that dispatches the coordinator's HTTP API.
 func (h Handlers) Router() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.healthz)
@@ -35,7 +41,7 @@ func (h Handlers) Router() http.Handler {
 	return mux
 }
 
-func (h Handlers) healthz(w http.ResponseWriter, _ *http.Request) {
+func (Handlers) healthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
@@ -48,7 +54,11 @@ func (h Handlers) role(w http.ResponseWriter, r *http.Request) {
 	if m, err := h.Drainer.Managers(r.Context()); err == nil {
 		leader = m.Leader
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"role": h.Role(), "leader": leader})
+	writeJSON(w, http.StatusOK, map[string]string{
+		"role":    h.Role(),
+		"leader":  leader,
+		"version": h.Version,
+	})
 }
 
 func (h Handlers) managersHealth(w http.ResponseWriter, r *http.Request) {
@@ -64,45 +74,54 @@ func (h Handlers) lock(w http.ResponseWriter, r *http.Request) {
 	id := identity.FromContext(r.Context())
 	switch r.Method {
 	case http.MethodPost:
-		res, err := h.Store.Acquire(r.Context(), id, h.LockTTL)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		// res.Current may be nil for HeldByOther in a race where the winning
-		// peer's lock vanished before we could re-inspect; respond with an
-		// empty object so clients always get well-formed JSON.
-		body := func(l *lock.Lock) any {
-			if l == nil {
-				return map[string]any{}
-			}
-			return l
-		}
-		switch res.Status {
-		case lock.Acquired:
-			writeJSON(w, http.StatusCreated, body(res.Current))
-		case lock.AcquiredViaSteal:
-			writeJSON(w, http.StatusGone, body(res.Current))
-		case lock.HeldByOther:
-			writeJSON(w, http.StatusConflict, body(res.Current))
-		default:
-			http.Error(w, "unknown acquire status", http.StatusInternalServerError)
-		}
+		h.lockAcquire(w, r, id)
 	case http.MethodDelete:
-		err := h.Store.Release(r.Context(), id)
-		switch {
-		case err == nil:
-			w.WriteHeader(http.StatusNoContent)
-		case errors.Is(err, lock.ErrNotHolder):
-			http.Error(w, "not holder", http.StatusForbidden)
-		case errors.Is(err, lock.ErrNoLock):
-			http.Error(w, "no lock", http.StatusNotFound)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		h.lockRelease(w, r, id)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (h Handlers) lockAcquire(w http.ResponseWriter, r *http.Request, id string) {
+	res, err := h.Store.Acquire(r.Context(), id, h.LockTTL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	switch res.Status {
+	case lock.Acquired:
+		writeJSON(w, http.StatusCreated, lockBody(res.Current))
+	case lock.AcquiredViaSteal:
+		writeJSON(w, http.StatusGone, lockBody(res.Current))
+	case lock.HeldByOther:
+		writeJSON(w, http.StatusConflict, lockBody(res.Current))
+	default:
+		http.Error(w, "unknown acquire status", http.StatusInternalServerError)
+	}
+}
+
+func (h Handlers) lockRelease(w http.ResponseWriter, r *http.Request, id string) {
+	err := h.Store.Release(r.Context(), id)
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, lock.ErrNotHolder):
+		http.Error(w, "not holder", http.StatusForbidden)
+	case errors.Is(err, lock.ErrNoLock):
+		http.Error(w, "no lock", http.StatusNotFound)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// lockBody normalises a nil *lock.Lock to an empty JSON object. Current may be
+// nil for HeldByOther in a race where the winning peer's lock vanished before
+// we could re-inspect; this keeps the response well-formed.
+func lockBody(current *lock.Lock) any {
+	if current == nil {
+		return map[string]any{}
+	}
+	return current
 }
 
 func (h Handlers) drain(w http.ResponseWriter, r *http.Request) {
@@ -160,5 +179,6 @@ func (h Handlers) active(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	//nolint:errchkjson // body shapes used here are always encodable; response is best-effort
 	_ = json.NewEncoder(w).Encode(v)
 }

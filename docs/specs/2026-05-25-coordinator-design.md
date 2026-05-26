@@ -62,7 +62,7 @@ One Docker image, one Swarm service, **global mode** — one replica per node.
 - **Single image, single service.** Promote/demote operations are picked up at runtime via periodic `docker info` re-check.
 - **No identity infrastructure.** Trust boundaries are:
   - Host → local replica: `127.0.0.1` bind (root-on-host trust).
-  - Worker replica → manager replica: the swarm internal overlay network (attaching to it requires the swarm join token).
+  - Worker replica → manager replica: the swarm internal overlay network (attaching to it requires the swarm join token). Caller identity within that boundary is derived from the source IP via the Docker socket — not from a client-controlled header — so a malicious peer cannot impersonate another node by setting `X-Origin-Node`. See §3.3.
   - Replica → Docker socket: standard Docker UNIX socket permissions.
 - **Lock primitive:** `docker config create swarm-auto-drain-lock` — atomic CAS (create-fails-on-exists) backed by Swarm raft.
 - **Sentinel pattern** mirrors `updates::reboot` ES tier: `/var/lib/swarm-auto-drain/draining` written before reboot, gates the resume systemd unit via `ConditionPathExists` so non-coordinated boots (kernel panic, power loss, manual `reboot`) do not run the resume logic.
@@ -76,7 +76,9 @@ At startup, every replica calls `docker info` via the local socket. The boolean 
 - `true` → manager mode: handle requests in-process.
 - `false` → worker mode: forward requests to `tasks.swarm-auto-drain:7777` via the overlay network.
 
-Re-checked every 30s in a background goroutine, plus lazily on the first request after a configurable cache window. This handles `docker node promote` / `docker node demote` without a stack restart.
+Re-checked every 30s in a background goroutine. In addition, the Docker client used by the handler tree is wrapped with `dockerpkg.WithRoleRefresh`: any manager-only API call (`docker config create/inspect/rm`, `docker node ls/update`, etc.) that returns the daemon's `"This node is not a swarm manager"` error triggers a synchronous role refresh before the error returns. This means a demoted manager flips its cached role within the same failed request — the caller's retry (e.g. `forward.Forwarder.Retries`) then dispatches to the worker handler and forwards to a peer manager rather than failing again locally. Together, the periodic poll bounds the worst-case lag for the *symmetric* case (worker→manager promotion, where the local socket can't observe the change), while the lazy-on-error path effectively eliminates lag for the demote case that would otherwise leak `500`s for up to one poll interval.
+
+This handles `docker node promote` / `docker node demote` without a stack restart.
 
 ### 3.2 HTTP API
 
@@ -97,7 +99,11 @@ All endpoints listen on `127.0.0.1:7777` (host-network publishing). JSON request
 Identity is the **node hostname** of the original caller. Resolution rules:
 
 - If the request arrived on `127.0.0.1` (loopback from the host script), identity = the replica's own `NODE_HOSTNAME` env var (injected at deploy time via `{{.Node.Hostname}}`).
-- If the request arrived from a peer replica over the overlay network, identity = the value of the `X-Origin-Node` header that the forwarding replica set.
+- If the request arrived from a peer replica over the overlay network, identity is **derived server-side** from the source IP: the manager replica looks up the IP in its own service's task list (`TaskList(service=<self>, desired-state=running)` joined with `NodeList`) and reads the hostname of the node whose task owns that overlay address. The forwarding replica still sets an `X-Origin-Node` header; the manager treats it as advisory and **rejects the request if the header disagrees with the IP-derived value**.
+
+The IP-derived path is fail-closed: if the source IP doesn't match any running task of our service (spoofer, or a peer task that just joined and hasn't propagated through raft yet), the request returns `400`. The worker-side forwarder will retry via `forward.Retries`, which covers the brief propagation window.
+
+The service name used in the lookup is **self-discovered** at startup, not configured. The coordinator reads its own container ID from `/proc/self/cgroup`, calls `ContainerInspect`, and reads the `com.docker.swarm.service.name` label that the swarm orchestrator stamps on every task container. This means consumers may name the service whatever they like in their stack file — the coordinator adapts. The same discovered name is also used to build the overlay DNS name (`tasks.<service-name>`) for worker→manager forwarding.
 
 The coordinator never trusts a body-supplied identity. There is no `/nodes/{name}` URL segment — every endpoint acts on the caller's own node only.
 

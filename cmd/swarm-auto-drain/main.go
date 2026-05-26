@@ -1,149 +1,88 @@
-// swarm-auto-drain is the coordinator daemon. See docs/specs/.
+// Package main implements the swarm-auto-drain coordinator binary. The
+// same binary runs in three contexts — as the daemon inside the Swarm
+// service (`run`), as a host-side timer-fired client (`trigger`,
+// `resume`), and as an operator tool (`install`, `uninstall`, `stack`,
+// `version`). Which context applies is decided by os.Args[1].
 package main
 
 import (
-	"context"
-	"log/slog"
-	"net/http"
+	"fmt"
+	"io"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
-
-	"github.com/matchory/swarm-auto-drain/internal/api"
-	"github.com/matchory/swarm-auto-drain/internal/config"
-	dockerpkg "github.com/matchory/swarm-auto-drain/internal/docker"
-	"github.com/matchory/swarm-auto-drain/internal/drain"
-	"github.com/matchory/swarm-auto-drain/internal/forward"
-	"github.com/matchory/swarm-auto-drain/internal/identity"
-	"github.com/matchory/swarm-auto-drain/internal/lock"
-	"github.com/matchory/swarm-auto-drain/internal/logging"
 )
 
+// version is overridden at link time via `-ldflags="-X main.version=..."`.
+// It's read by the version subcommand and embedded into the /role HTTP
+// response so host-side clients can detect daemon-vs-host version skew.
 var version = "dev"
 
+// subcommand is the signature every dispatchable command implements.
+// Returning an int rather than an error lets each command decide its own
+// exit code (config errors → 2, runtime errors → 1, etc.) without
+// teaching main about every command's failure modes.
+type subcommand func(args []string) int
+
+// subcommands is the dispatch table for the binary's subcommands. It's
+// a var rather than a const so tests can swap it for fakes — the
+// dispatcher-level tests rely on this. Treat as immutable in production.
+var subcommands = map[string]subcommand{
+	"run":       runCmd,
+	"trigger":   triggerCmd,
+	"resume":    resumeCmd,
+	"install":   installCmd,
+	"uninstall": uninstallCmd,
+	"stack":     stackCmd,
+	"version":   versionCmd,
+}
+
+// minArgsForSubcommand is the argv length below which we treat the
+// invocation as "no subcommand specified" and default to `run`. Argv[0]
+// is the binary name, so anything < 2 means no subcommand was given.
+const minArgsForSubcommand = 2
+
+// exitUnknownSubcommand is the exit code for an unrecognized subcommand.
+// Distinct from exitConfigErr (also 2) at the dispatch layer — same
+// value, different semantics, no caller currently disambiguates.
+const exitUnknownSubcommand = 2
+
 func main() {
-	cfg, err := config.Load()
-	if err != nil {
-		os.Stderr.WriteString("config: " + err.Error() + "\n")
-		os.Exit(2)
-	}
-	logging.Setup(cfg.LogLevel)
-	slog.Info("starting", "version", version, "node", cfg.NodeHostname)
-
-	dcli, err := dockerpkg.New(cfg.DockerSocket)
-	if err != nil {
-		slog.Error("docker client", "err", err)
-		os.Exit(1)
-	}
-	defer dcli.Close()
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	role := dockerpkg.NewRoleDetector(dcli, cfg.RoleRecheck)
-	if err := role.Refresh(ctx); err != nil {
-		slog.Error("initial docker info", "err", err)
-		os.Exit(1)
-	}
-	go role.Run(ctx)
-
-	store := &lock.ConfigStore{Docker: dcli, ConfigName: cfg.LockConfigName}
-	drainer := &drain.DockerDrainer{Docker: dockerAdapter{dcli}}
-
-	handlers := api.Handlers{
-		Store:        store,
-		Drainer:      drainer,
-		LockTTL:      cfg.LockTTL,
-		DrainTimeout: cfg.DrainTimeout,
-		PollInterval: 2 * time.Second,
-		Role:         func() string { return role.Role().String() },
-	}
-	mw := identity.Middleware{
-		NodeHostname: cfg.NodeHostname,
-		PublicPaths:  []string{"/healthz", "/role"},
-	}
-
-	mf := &forward.ManagerFinder{
-		ServiceDNS: "tasks.swarm-auto-drain",
-		Port:       7777,
-		Client:     &http.Client{Timeout: 3 * time.Second},
-		TTL:        cfg.ManagerDiscoveryTTL,
-	}
-	fwd := &forward.Forwarder{
-		OriginNode:       cfg.NodeHostname,
-		FindManagerURL:   mf.Find,
-		OnAttemptFailure: mf.Invalidate,
-		Client:           &http.Client{Timeout: cfg.ForwardTimeout},
-		Retries:          2,
-	}
-
-	// /healthz and /role are served locally on both managers and workers so
-	// the host script's wait loop doesn't depend on a manager being reachable
-	// or on the current role.
-	managerHandler := mw.Wrap(handlers.Router())
-	workerHandler := buildWorkerHandler(handlers.Router(), fwd)
-
-	// Per-request role dispatch. role.Role() is updated by the recheck
-	// goroutine, so promote/demote at runtime takes effect on the next
-	// inbound request without a restart.
-	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if role.Role() == dockerpkg.RoleManager {
-			managerHandler.ServeHTTP(w, r)
-		} else {
-			workerHandler.ServeHTTP(w, r)
-		}
-	})
-
-	srv := &api.Server{
-		Addr:          cfg.ListenAddr,
-		Handler:       router,
-		ShutdownGrace: cfg.DrainTimeout + 30*time.Second,
-	}
-	slog.Info("listening", "addr", cfg.ListenAddr, "initial_role", role.Role().String())
-	if err := srv.Run(ctx); err != nil {
-		slog.Error("server", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("shutdown complete")
+	os.Exit(dispatch(os.Args))
 }
 
-// buildWorkerHandler routes /healthz and /role to the local handler tree (so
-// the host script can probe a worker locally) and forwards everything else
-// to a manager replica.
-func buildWorkerHandler(local http.Handler, fwd http.Handler) http.Handler {
-	mux := http.NewServeMux()
-	mux.Handle("/healthz", local)
-	mux.Handle("/role", local)
-	mux.Handle("/", fwd)
-	return mux
+// dispatch routes argv[1] to the appropriate subcommand. With no
+// subcommand specified, defaults to "run" — preserves the container's
+// existing entrypoint behavior (the Dockerfile sets CMD ["run"] but a
+// hand-invocation of the binary still works).
+func dispatch(args []string) int {
+	if len(args) < minArgsForSubcommand {
+		return subcommands["run"](nil)
+	}
+	switch args[1] {
+	case "-h", "--help", "help":
+		printUsage(os.Stdout)
+		return 0
+	}
+	cmd, ok := subcommands[args[1]]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", args[1])
+		printUsage(os.Stderr)
+		return exitUnknownSubcommand
+	}
+	return cmd(args[2:])
 }
 
-// dockerAdapter bridges internal/docker.NodeSummary to internal/drain.NodeSummary
-// (same shape, separate package to avoid the drain package importing internal/docker
-// and creating a cycle).
-type dockerAdapter struct{ c dockerpkg.Client }
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `usage: swarm-auto-drain <subcommand> [args...]
 
-func (a dockerAdapter) NodeList(ctx context.Context, fs map[string][]string) ([]drain.NodeSummary, error) {
-	src, err := a.c.NodeList(ctx, fs)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]drain.NodeSummary, len(src))
-	for i, n := range src {
-		out[i] = drain.NodeSummary{
-			Hostname:     n.Hostname,
-			Role:         n.Role,
-			Reachability: n.Reachability,
-			Availability: n.Availability,
-			Leader:       n.Leader,
-		}
-	}
-	return out, nil
-}
-func (a dockerAdapter) NodeUpdate(ctx context.Context, n, av string) error {
-	return a.c.NodeUpdate(ctx, n, av)
-}
-func (a dockerAdapter) NodeTaskCount(ctx context.Context, n string) (int, error) {
-	return a.c.NodeTaskCount(ctx, n)
+subcommands:
+  run        start the coordinator daemon (default if no subcommand given)
+  trigger    host-side: check policy and coordinate a reboot
+  resume     host-side: re-activate after coordinated reboot
+  install    install systemd units and env file on this host
+  uninstall  remove the systemd units installed by install
+  stack      render the docker-stack YAML to stdout
+  version    print version and exit
+
+See docs/specs/ for the full design.
+`)
 }

@@ -1,0 +1,255 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: true
+
+linters:
+  default: all
+  disable:
+    # Need project-specific config; enable later with a real allowlist.
+    - depguard
+    - gomodguard
+    # Not applicable to this codebase.
+    - ginkgolinter
+    - protogetter
+    - rowserrcheck
+    - sqlclosecheck
+    - zerologlint
+    - loggercheck
+    # Overly restrictive in our judgement; revisit if patterns emerge.
+    - ireturn
+    # Conflicts with default Go idiom: `if err := f(); err != nil { ... }`.
+    - noinlineerr
+    # All three whitespace linters disagree with each other and the canonical
+    # Go style; we prefer to let gofumpt own formatting.
+    - nlreturn
+    - wsl
+    - wsl_v5
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      # check-blank intentionally off: `_ = foo()` already documents intent;
+      # forcing nolint comments on every body.Close() is noise without signal.
+      check-blank: false
+
+    cyclop:
+      max-complexity: 12
+      package-average: 8
+
+    funlen:
+      lines: 100
+      statements: 50
+
+    gocognit:
+      min-complexity: 20
+
+    gocyclo:
+      min-complexity: 12
+
+    nestif:
+      min-complexity: 4
+
+    maintidx:
+      under: 20
+
+    gocritic:
+      enable-all: true
+      disabled-checks:
+        - unnamedResult
+        - whyNoLint
+
+    revive:
+      enable-all-rules: true
+      rules:
+        - name: line-length-limit
+          arguments: [120]
+        - name: function-length
+          arguments: [60, 0]
+        - name: cognitive-complexity
+          arguments: [20]
+        - name: cyclomatic
+          arguments: [12]
+        - name: max-public-structs
+          disabled: true
+        - name: add-constant
+          disabled: true
+        - name: unhandled-error
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: file-header
+          disabled: true
+        - name: banned-characters
+          disabled: true
+        - name: argument-limit
+          arguments: [6]
+        - name: function-result-limit
+          arguments: [4]
+
+    govet:
+      enable-all: true
+      settings:
+        shadow:
+          strict: true
+
+    gosec:
+      severity: low
+      confidence: low
+
+    staticcheck:
+      checks: ["all"]
+
+    exhaustive:
+      default-signifies-exhaustive: false
+
+    godot:
+      scope: all
+      capital: true
+
+    misspell:
+      locale: US
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    perfsprint:
+      strconcat: true
+
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+          yaml: snake
+          env: upperSnake
+
+    testifylint:
+      enable-all: true
+
+    varnamelen:
+      min-name-length: 2
+      ignore-decls:
+        - t testing.T
+        - i int
+        - n int
+        - w http.ResponseWriter
+        - r *http.Request
+      ignore-names:
+        - id
+        - ip
+        - ok
+        - tt
+        - tc
+        - eg
+        - wg
+        - mu
+        - fn
+        - cb
+        - kv
+
+    exhaustruct:
+      exclude:
+        # Stdlib & third-party structs that are commonly partially-initialized.
+        - 'net/http\.(Server|Client|Request|Transport)'
+        - 'crypto/tls\.Config'
+        - 'log/slog\.HandlerOptions'
+        - 'github.com/docker/docker/.*'
+
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+      ignore-package-globs:
+        - github.com/matchory/swarm-auto-drain/*
+
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # fieldalignment is cosmetic for test fixtures and rarely worth optimizing.
+      - path: _test\.go
+        text: 'fieldalignment'
+        linters:
+          - govet
+      # Test files: relax the noisiest checks.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - containedctx
+          - contextcheck
+          - cyclop
+          - dupl
+          - err113
+          - errcheck
+          - errchkjson
+          - exhaustruct
+          - forcetypeassert
+          - funlen
+          - gochecknoglobals
+          - gocognit
+          - goconst
+          - gocyclo
+          - gosec
+          - lll
+          - maintidx
+          - mnd
+          - nestif
+          - noctx
+          - paralleltest
+          - testpackage
+          - thelper
+          - tparallel
+          - varnamelen
+          - wrapcheck
+          - wsl_v5
+      # Entrypoint: allow globals/init for wiring.
+      - path: cmd/swarm-auto-drain/main\.go
+        linters:
+          - exhaustruct
+          - forbidigo
+          - gochecknoglobals
+          - gochecknoinits
+          - wrapcheck
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/matchory/swarm-auto-drain
+    gofumpt:
+      extra-rules: true
+
+output:
+  formats:
+    text:
+      print-linter-name: true
+      print-issued-lines: true
+  sort-order:
+    - file
+    - linter
+    - severity
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

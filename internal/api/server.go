@@ -2,47 +2,135 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
-// Server bundles an http.Server configured with the given handler. Run
-// blocks until ctx is cancelled, then performs a graceful shutdown.
+// errNoListeners signals an API misuse: Server.Run with no ListenerSpec.
+var errNoListeners = errors.New("api.Server: no listeners configured")
+
+// Server runs one http.Server per configured listener, all sharing the
+// same ShutdownGrace. Different listeners typically pair with different
+// handlers — e.g. a TCP listener on the overlay network using the
+// IP-derived identity middleware, and a Unix socket listener using
+// HostTrust where filesystem permissions are the access boundary.
+// Field order puts pointer/slice fields up front to shrink the GC pointer-scan window.
 type Server struct {
-	Addr    string
-	Handler http.Handler
-	// ShutdownGrace bounds how long Shutdown waits for in-flight handlers to
-	// complete. Should be at least DrainTimeout + a small buffer so an
-	// in-flight POST /drain isn't truncated mid-operation on SIGTERM. Zero
-	// → 30 seconds.
+	Listeners     []ListenerSpec
 	ShutdownGrace time.Duration
 }
 
+// ListenerSpec pairs a pre-bound net.Listener with the handler that
+// should serve traffic accepted on it. The Name is used in log lines and
+// error messages only — pick something operators will recognize
+// ("overlay-tcp", "host-unix-socket").
+//
+// ConnContext, if non-nil, is set on the listener's underlying
+// http.Server. It's invoked once per accepted connection BEFORE the
+// request handler runs, so it's the right hook for stamping properties
+// of the connection (e.g. peer credentials from SO_PEERCRED on a Unix
+// socket) into the request context.
+//
+// Field order puts pointer/interface fields first.
+type ListenerSpec struct {
+	Listener    net.Listener
+	Handler     http.Handler
+	ConnContext func(ctx context.Context, c net.Conn) context.Context
+	Name        string
+}
+
+const (
+	defaultShutdownGrace = 30 * time.Second
+	readHeaderTimeout    = 10 * time.Second
+)
+
+// Run starts every configured listener concurrently and blocks until ctx
+// is canceled or one of the underlying http.Server instances fails
+// fatally. On cancellation, all listeners get up to ShutdownGrace to
+// drain in-flight handlers. Each listener's http.Server.Shutdown runs in
+// parallel and shares the same deadline budget.
 func (s *Server) Run(ctx context.Context) error {
+	if len(s.Listeners) == 0 {
+		return errNoListeners
+	}
 	grace := s.ShutdownGrace
 	if grace <= 0 {
-		grace = 30 * time.Second
+		grace = defaultShutdownGrace
 	}
-	srv := &http.Server{
-		Addr:              s.Addr,
-		Handler:           s.Handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	errCh := make(chan error, 1)
-	go func() {
-		err := srv.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-		close(errCh)
-	}()
 
+	servers := make([]*http.Server, len(s.Listeners))
+	errCh := make(chan error, len(s.Listeners))
+	var wg sync.WaitGroup
+	for i, spec := range s.Listeners {
+		srv := &http.Server{
+			Handler:           spec.Handler,
+			ReadHeaderTimeout: readHeaderTimeout,
+			ConnContext:       spec.ConnContext,
+		}
+		servers[i] = srv
+		name, l := spec.Name, spec.Listener
+		wg.Go(func() {
+			if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("listener %q: %w", name, err)
+			}
+		})
+	}
+
+	// Wait for either ctx cancellation or any listener failing.
+	var firstErr error
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), grace)
-		defer cancel()
-		return srv.Shutdown(shutCtx)
 	case err := <-errCh:
-		return err
+		firstErr = err
 	}
+
+	shutErr := shutdownAll(ctx, servers, grace)
+	wg.Wait()
+	// Drain any errors that arrived from other listeners while we were
+	// shutting down — operators chasing a startup failure need every
+	// listener's complaint, not just whichever one happened to fire
+	// first into the select.
+	close(errCh)
+	listenerErrs := []error{firstErr}
+	for err := range errCh {
+		listenerErrs = append(listenerErrs, err)
+	}
+	return errors.Join(append(listenerErrs, shutErr)...)
+}
+
+// shutdownAll calls Shutdown on every server in parallel with a shared
+// grace budget. The parent ctx is accepted only to make the call site
+// pass contextcheck; we deliberately do NOT derive from it because
+// Shutdown must outlive whatever caused the shutdown — reusing the
+// canceled parent ctx would immediately truncate in-flight handlers,
+// defeating the point of ShutdownGrace.
+//
+//nolint:contextcheck // fresh ctx is intentional; see doc comment above
+func shutdownAll(_ context.Context, servers []*http.Server, grace time.Duration) error {
+	shutCtx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make(chan error, len(servers))
+	for _, srv := range servers {
+		s := srv
+		wg.Go(func() {
+			if err := s.Shutdown(shutCtx); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	// Aggregate via errors.Join — if both servers fail (e.g. handlers
+	// blocked past grace deadline on both), the operator needs to see
+	// both errors, not just whichever came back first.
+	var collected []error
+	for err := range errs {
+		collected = append(collected, fmt.Errorf("http shutdown: %w", err))
+	}
+	return errors.Join(collected...)
 }

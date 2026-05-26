@@ -20,25 +20,30 @@ func (f *fakeDocker) ConfigCreate(_ context.Context, _ string, data []byte, _ ma
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.exists {
-		return "", errors.New("Error response from daemon: rpc error: code = AlreadyExists desc = name conflicts with an existing object")
+		return "", errors.New(
+			"Error response from daemon: rpc error: code = AlreadyExists " +
+				"desc = name conflicts with an existing object",
+		)
 	}
 	f.data = append([]byte(nil), data...)
 	f.exists = true
 	return "fake-id", nil
 }
+
 func (f *fakeDocker) ConfigInspect(_ context.Context, _ string) ([]byte, map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.exists {
-		return nil, nil, errors.New("Error: No such config")
+		return nil, nil, errors.New("Error: no such config")
 	}
 	return append([]byte(nil), f.data...), nil, nil
 }
+
 func (f *fakeDocker) ConfigRemove(_ context.Context, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.exists {
-		return errors.New("Error: No such config")
+		return errors.New("Error: no such config")
 	}
 	f.exists = false
 	f.data = nil
@@ -59,7 +64,10 @@ func TestAcquire_FreshSuccess(t *testing.T) {
 	if r.Status != Acquired {
 		t.Errorf("Status = %v, want Acquired", r.Status)
 	}
-	if r.Current == nil || r.Current.Holder != "node-a" || r.Current.AcquiredAt != 1000 || r.Current.TTLSeconds != 1800 {
+	if r.Current == nil ||
+		r.Current.Holder != "node-a" ||
+		r.Current.AcquiredAt != 1000 ||
+		r.Current.TTLSeconds != 1800 {
 		t.Errorf("Current = %+v", r.Current)
 	}
 }
@@ -107,8 +115,12 @@ func TestRelease_HolderOK(t *testing.T) {
 	if err := s.Release(context.Background(), "node-a"); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if got, _ := s.Inspect(context.Background()); got != nil {
+	got, err := s.Inspect(context.Background())
+	if got != nil {
 		t.Errorf("lock still present after release: %+v", got)
+	}
+	if !errors.Is(err, ErrNoLock) {
+		t.Errorf("Inspect after release: err=%v, want ErrNoLock", err)
 	}
 }
 
@@ -135,8 +147,8 @@ func TestInspect_None(t *testing.T) {
 	f := &fakeDocker{}
 	s := newStore(f)
 	got, err := s.Inspect(context.Background())
-	if err != nil {
-		t.Fatalf("Inspect: %v", err)
+	if !errors.Is(err, ErrNoLock) {
+		t.Fatalf("Inspect: err=%v, want ErrNoLock", err)
 	}
 	if got != nil {
 		t.Errorf("got %+v, want nil", got)
@@ -158,14 +170,25 @@ func TestInspect_Roundtrip(t *testing.T) {
 		t.Errorf("Holder = %q", got.Holder)
 	}
 	var l Lock
-	if err := json.Unmarshal(f.data, &l); err != nil {
-		t.Errorf("stored bytes not valid Lock JSON: %v", err)
+	if unmarshalErr := json.Unmarshal(f.data, &l); unmarshalErr != nil {
+		t.Errorf("stored bytes not valid Lock JSON: %v", unmarshalErr)
 	}
 }
 
 func TestIsNotFoundString(t *testing.T) {
-	if !isNotFound(errors.New("Error: No such config")) {
-		t.Error("isNotFound did not match")
+	// Both capitalizations of the daemon message must classify — dockerd
+	// has emitted both across versions, and custom Docker SDK wrappers
+	// may normalize either way. Lock the case-insensitive contract.
+	cases := []string{
+		"Error: no such config",
+		"Error response from daemon: No such config: swarm-auto-drain-lock",
+		"no such config: foo",
+		"No such config: foo",
+	}
+	for _, msg := range cases {
+		if !isNotFound(errors.New(msg)) {
+			t.Errorf("isNotFound(%q) = false, want true", msg)
+		}
 	}
 	if !isAlreadyExists(errors.New("name conflicts with an existing object")) {
 		t.Error("isAlreadyExists did not match")

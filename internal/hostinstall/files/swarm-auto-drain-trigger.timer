@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically check whether this swarm node needs a coordinated reboot
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

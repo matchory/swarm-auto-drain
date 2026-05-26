@@ -28,7 +28,7 @@ func TestForward_AddsOriginNodeHeader(t *testing.T) {
 		Client:         &http.Client{Timeout: time.Second},
 	}
 
-	req := httptest.NewRequest("POST", "/lock", strings.NewReader(`{"x":1}`))
+	req := httptest.NewRequest(http.MethodPost, "/lock", strings.NewReader(`{"x":1}`))
 	rr := httptest.NewRecorder()
 	f.ServeHTTP(rr, req)
 
@@ -49,7 +49,7 @@ func TestForward_NoManagerFound(t *testing.T) {
 		FindManagerURL: func() (string, error) { return "", errNoManagerForTest },
 		Client:         &http.Client{Timeout: time.Second},
 	}
-	req := httptest.NewRequest("GET", "/lock", nil)
+	req := httptest.NewRequest(http.MethodGet, "/lock", http.NoBody)
 	rr := httptest.NewRecorder()
 	f.ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
@@ -59,7 +59,7 @@ func TestForward_NoManagerFound(t *testing.T) {
 
 func TestForward_ManagerUnreachableInvalidatesCache(t *testing.T) {
 	var calls int32
-	mgr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mgr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`ok`))
 	}))
@@ -70,14 +70,14 @@ func TestForward_ManagerUnreachableInvalidatesCache(t *testing.T) {
 		FindManagerURL: func() (string, error) {
 			n := atomic.AddInt32(&calls, 1)
 			if n == 1 {
-				return "http://127.0.0.1:1", nil // unreachable
+				return "http://127.0.0.1:1", nil // Unreachable.
 			}
 			return mgr.URL, nil
 		},
 		Client:  &http.Client{Timeout: 200 * time.Millisecond},
 		Retries: 2,
 	}
-	req := httptest.NewRequest("GET", "/healthz", nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
 	rr := httptest.NewRecorder()
 	f.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -104,7 +104,7 @@ func TestForward_StripsHopByHopHeaders(t *testing.T) {
 		FindManagerURL: func() (string, error) { return mgr.URL, nil },
 		Client:         &http.Client{Timeout: time.Second},
 	}
-	req := httptest.NewRequest("GET", "/x", nil)
+	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	req.Header.Set("Transfer-Encoding", "chunked")
 	req.Header.Set("Connection", "close")
 	req.Header.Set("X-Keep", "yes")
@@ -129,12 +129,12 @@ func TestForward_OnAttemptFailureCalled(t *testing.T) {
 	var failures int32
 	f := &Forwarder{
 		OriginNode:       "n",
-		FindManagerURL:   func() (string, error) { return "http://127.0.0.1:1", nil }, // unreachable
+		FindManagerURL:   func() (string, error) { return "http://127.0.0.1:1", nil }, // Unreachable.
 		OnAttemptFailure: func() { atomic.AddInt32(&failures, 1) },
 		Client:           &http.Client{Timeout: 100 * time.Millisecond},
 		Retries:          2,
 	}
-	req := httptest.NewRequest("GET", "/x", nil)
+	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	rr := httptest.NewRecorder()
 	f.ServeHTTP(rr, req)
 	if got := atomic.LoadInt32(&failures); got != 3 {
@@ -145,8 +145,8 @@ func TestForward_OnAttemptFailureCalled(t *testing.T) {
 	}
 }
 
-var errNoManagerForTest = errString("no manager available")
+var errNoManagerForTest = testError("no manager available")
 
-type errString string
+type testError string
 
-func (e errString) Error() string { return string(e) }
+func (e testError) Error() string { return string(e) }

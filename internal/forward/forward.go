@@ -11,12 +11,15 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"sync"
 	"time"
 )
 
 // hop-by-hop headers (RFC 7230 §6.1) that an intermediary MUST strip and not
 // forward. Connection-specific headers from inbound + response are dropped.
+//
+//nolint:gochecknoglobals // immutable lookup table; const-equivalent for maps
 var hopHeaders = map[string]bool{
 	"Connection":          true,
 	"Keep-Alive":          true,
@@ -27,6 +30,16 @@ var hopHeaders = map[string]bool{
 	"Transfer-Encoding":   true,
 	"Upgrade":             true,
 }
+
+// dnsLookupTimeout bounds the DNS resolution for the manager service name.
+const dnsLookupTimeout = 2 * time.Second
+
+// probeTimeout bounds the /role probe to a candidate manager replica.
+const probeTimeout = 2 * time.Second
+
+// errUpstream5xx is returned internally when a forwarded request gets a 5xx
+// response and we still have retries remaining.
+var errUpstream5xx = errors.New("upstream 5xx")
 
 func copyHeaders(dst, src http.Header) {
 	for k, vs := range src {
@@ -41,8 +54,9 @@ func copyHeaders(dst, src http.Header) {
 
 // Forwarder is an http.Handler that proxies inbound requests to a manager
 // replica. Used in worker mode only.
+// Field order groups pointer/func fields up front so the GC pointer-scan
+// window stays compact.
 type Forwarder struct {
-	OriginNode     string
 	FindManagerURL func() (string, error)
 	// OnAttemptFailure is invoked when a forwarding attempt fails (connection
 	// error or 5xx response). Wired to ManagerFinder.Invalidate so the next
@@ -50,9 +64,12 @@ type Forwarder struct {
 	// dead one. Nil-safe.
 	OnAttemptFailure func()
 	Client           *http.Client
-	Retries          int // 1 attempt + Retries extra attempts; default 0 (one attempt)
+	OriginNode       string
+	Retries          int // 1 attempt + Retries extra attempts; default 0 (one attempt).
 }
 
+// ServeHTTP proxies the inbound request to a manager replica, retrying on
+// connection failure or 5xx responses.
 func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -62,26 +79,28 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	attempts := f.Retries + 1
 	var lastErr error
-	for i := 0; i < attempts; i++ {
-		base, err := f.FindManagerURL()
-		if err != nil {
-			lastErr = err
+	for i := range attempts {
+		base, findErr := f.FindManagerURL()
+		if findErr != nil {
+			lastErr = findErr
 			if f.OnAttemptFailure != nil {
 				f.OnAttemptFailure()
 			}
 			continue
 		}
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, base+r.URL.RequestURI(), bytes.NewReader(body))
-		if err != nil {
-			lastErr = err
+		//nolint:gosec // SSRF: by design — this *is* a proxy; URL host is from trusted ManagerFinder
+		req, reqErr := http.NewRequestWithContext(r.Context(), r.Method, base+r.URL.RequestURI(), bytes.NewReader(body))
+		if reqErr != nil {
+			lastErr = reqErr
 			continue
 		}
 		copyHeaders(req.Header, r.Header)
 		req.Header.Set("X-Origin-Node", f.OriginNode)
 
-		resp, err := f.Client.Do(req)
-		if err != nil {
-			lastErr = err
+		//nolint:gosec // SSRF: see comment above; this proxy intentionally forwards client URLs
+		resp, doErr := f.Client.Do(req)
+		if doErr != nil {
+			lastErr = doErr
 			if f.OnAttemptFailure != nil {
 				f.OnAttemptFailure()
 			}
@@ -89,9 +108,9 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// 5xx — treat as a failed attempt so we re-probe; we still propagate
 		// the last 5xx response if we run out of retries.
-		if resp.StatusCode >= 500 && i < attempts-1 {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("upstream %d", resp.StatusCode)
+		if resp.StatusCode >= http.StatusInternalServerError && i < attempts-1 {
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("%w: %d", errUpstream5xx, resp.StatusCode)
 			if f.OnAttemptFailure != nil {
 				f.OnAttemptFailure()
 			}
@@ -100,7 +119,7 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return
 	}
 	http.Error(w, fmt.Sprintf("no manager available: %v", lastErr), http.StatusServiceUnavailable)
@@ -110,18 +129,21 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // service's overlay DNS name, then probes /role on each to find ones in
 // manager mode. Results are cached.
 type ManagerFinder struct {
-	ServiceDNS string
-	Port       int
+	cachedAt   time.Time
 	Client     *http.Client
+	ServiceDNS string
+	cached     string
+	mu         sync.Mutex
 	TTL        time.Duration
-
-	mu       sync.Mutex
-	cached   string
-	cachedAt time.Time
+	Port       int
 }
 
+// ErrNoManager indicates no manager replica was found via service DNS.
 var ErrNoManager = errors.New("no manager replica found")
 
+// Find returns the base URL of a manager replica, using the cache when fresh
+// or re-probing service DNS otherwise. Returns ErrNoManager if no probed peer
+// reports manager role.
 func (m *ManagerFinder) Find() (string, error) {
 	m.mu.Lock()
 	if m.cached != "" && time.Since(m.cachedAt) < m.TTL {
@@ -131,22 +153,18 @@ func (m *ManagerFinder) Find() (string, error) {
 	}
 	m.mu.Unlock()
 
-	ips, err := net.LookupIP(m.ServiceDNS)
+	lookupCtx, lookupCancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
+	addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, m.ServiceDNS)
+	lookupCancel()
 	if err != nil {
 		return "", fmt.Errorf("lookup %s: %w", m.ServiceDNS, err)
 	}
-	for _, ip := range ips {
-		base := fmt.Sprintf("http://%s:%d", ip.String(), m.Port)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, "GET", base+"/role", nil)
-		resp, err := m.Client.Do(req)
-		cancel()
-		if err != nil {
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode == 200 && bytes.Contains(body, []byte(`"manager"`)) {
+	for _, addr := range addrs {
+		// HTTP (not HTTPS) over the swarm overlay network is intentional:
+		// the overlay is internal (no external reachability) and TLS would
+		// require provisioning per-task certs we don't currently issue.
+		base := "http://" + net.JoinHostPort(addr.IP.String(), strconv.Itoa(m.Port))
+		if m.probe(base) {
 			m.mu.Lock()
 			m.cached, m.cachedAt = base, time.Now()
 			m.mu.Unlock()
@@ -161,4 +179,25 @@ func (m *ManagerFinder) Invalidate() {
 	m.mu.Lock()
 	m.cached = ""
 	m.mu.Unlock()
+}
+
+// probe issues a short-deadline GET /role to base and reports whether the peer
+// self-identifies as a manager. Network errors are treated as "not a manager".
+func (m *ManagerFinder) probe(base string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/role", http.NoBody)
+	if err != nil {
+		return false
+	}
+	resp, err := m.Client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+	return resp.StatusCode == http.StatusOK && bytes.Contains(body, []byte(`"manager"`))
 }

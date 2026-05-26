@@ -2,29 +2,38 @@ package docker
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/system"
 )
 
+// Role identifies whether the local node currently acts as a swarm manager or worker.
 type Role int
 
+// Role values for RoleDetector.
 const (
+	// RoleUnknown is the zero value, used before the first successful refresh.
 	RoleUnknown Role = iota
+	// RoleWorker indicates the local node is a swarm worker (no control plane).
 	RoleWorker
+	// RoleManager indicates the local node is a swarm manager (control plane available).
 	RoleManager
 )
 
+// String returns the lowercase role name ("manager", "worker", "unknown").
 func (r Role) String() string {
 	switch r {
 	case RoleManager:
 		return "manager"
 	case RoleWorker:
 		return "worker"
-	default:
+	case RoleUnknown:
 		return "unknown"
 	}
+	return "unknown"
 }
 
 // roleInfoer is the subset of Client that RoleDetector needs.
@@ -43,10 +52,17 @@ type RoleDetector struct {
 	role Role
 }
 
+// NewRoleDetector constructs a RoleDetector that polls c on the given interval.
 func NewRoleDetector(c roleInfoer, interval time.Duration) *RoleDetector {
-	return &RoleDetector{client: c, interval: interval}
+	return &RoleDetector{
+		client:   c,
+		interval: interval,
+		mu:       sync.RWMutex{},
+		role:     RoleUnknown,
+	}
 }
 
+// Role returns the most recently observed role.
 func (d *RoleDetector) Role() Role {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -59,29 +75,31 @@ func (d *RoleDetector) Role() Role {
 func (d *RoleDetector) Refresh(ctx context.Context) error {
 	info, err := d.client.Info(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("docker info: %w", err)
 	}
-	r := RoleWorker
+	role := RoleWorker
 	if info.Swarm.ControlAvailable {
-		r = RoleManager
+		role = RoleManager
 	}
 	d.mu.Lock()
-	d.role = r
+	d.role = role
 	d.mu.Unlock()
 	return nil
 }
 
-// Run blocks until ctx is cancelled, refreshing on the configured interval.
+// Run blocks until ctx is canceled, refreshing on the configured interval.
 // Errors are suppressed — the cached value persists across transient failures.
 func (d *RoleDetector) Run(ctx context.Context) {
-	t := time.NewTicker(d.interval)
-	defer t.Stop()
+	ticker := time.NewTicker(d.interval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			_ = d.Refresh(ctx)
+		case <-ticker.C:
+			if err := d.Refresh(ctx); err != nil {
+				slog.Debug("role refresh failed", "err", err)
+			}
 		}
 	}
 }

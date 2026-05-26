@@ -32,18 +32,16 @@ func (f *fakeDocker) NodeList(_ context.Context, filters map[string][]string) ([
 		if wantRole != "" && n.Role != wantRole {
 			continue
 		}
-		out = append(out, NodeSummary{
-			Hostname: n.Hostname, Role: n.Role,
-			Reachability: n.Reachability, Availability: n.Availability,
-			Leader: n.Leader,
-		})
+		out = append(out, NodeSummary(n))
 	}
 	return out, nil
 }
+
 func (f *fakeDocker) NodeUpdate(_ context.Context, node, avail string) error {
 	f.updateCalls = append(f.updateCalls, node+":"+avail)
 	return f.updateErr
 }
+
 func (f *fakeDocker) NodeTaskCount(_ context.Context, _ string) (int, error) {
 	if len(f.tasks) == 0 {
 		return 0, nil
