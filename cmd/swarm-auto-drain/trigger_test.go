@@ -297,10 +297,36 @@ func TestTrigger_QuorumGuard(t *testing.T) {
 	if rebootN.Load() != 0 {
 		t.Errorf("reboots = %d", rebootN.Load())
 	}
-	if f.gotLockRelease.Load() != 0 {
-		t.Error("release attempted on quorum-guard exit 0 — should only release when exiting non-zero")
+	// 503 means we never drained — the lock MUST be released so the
+	// next candidate isn't blocked for the full TTL.
+	if f.gotLockRelease.Load() != 1 {
+		t.Errorf("releases = %d, want 1 (quorum guard must release)", f.gotLockRelease.Load())
 	}
 }
+
+// TestTrigger_RebootFailureKeepsLock guards the "after drain, lock
+// stays held even on errors" invariant. The runReboot contract: once
+// drain has succeeded, releasing the lock would let a peer start its
+// own reboot while this node is still alive.
+func TestTrigger_RebootFailureKeepsLock(t *testing.T) {
+	f := &fakeDaemon{}
+	dir := triggerEnv(t, serveFakeDaemon(t, f))
+	writeFile(t, filepath.Join(dir, "reboot-required"), "")
+
+	// Reboot returns an error after drain succeeded.
+	orig := systemctlReboot
+	systemctlReboot = func() error { return errBoom }
+	t.Cleanup(func() { systemctlReboot = orig })
+
+	if rc := triggerCmd(nil); rc != 1 {
+		t.Errorf("exit = %d, want 1", rc)
+	}
+	if f.gotLockRelease.Load() != 0 {
+		t.Errorf("releases = %d, want 0 (lock must stay held past commit)", f.gotLockRelease.Load())
+	}
+}
+
+var errBoom = fmt.Errorf("boom")
 
 func TestTrigger_VersionSkewWarning(t *testing.T) {
 	f := &fakeDaemon{

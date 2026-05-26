@@ -167,15 +167,21 @@ func run(cfg *config.Config) error {
 		}
 	})
 	// Host Unix-socket listener: filesystem permissions are the access
-	// boundary. Manager mode uses HostTrust (which also enforces the
-	// kernel-reported UID == 0 check via SO_PEERCRED); worker mode
-	// forwards outbound exactly as on TCP.
+	// boundary, with the kernel-reported UID == 0 check via SO_PEERCRED
+	// layered on top. HostTrust enforces that on BOTH manager and worker
+	// replicas — the gate must be uniform across the cluster, otherwise
+	// a non-root member of the swarm-coord group could drive /drain from
+	// a worker (forwarded to a manager) but not from a manager directly.
+	// In worker mode HostTrust still injects identity, but the forwarder
+	// overwrites X-Origin-Node from cfg.NodeHostname before relaying.
 	hostHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var inner http.Handler
 		if role.Role() == dockerpkg.RoleManager {
-			identity.HostTrust(cfg.NodeHostname, api.AuditLog(handlers.Router())).ServeHTTP(w, r)
+			inner = api.AuditLog(handlers.Router())
 		} else {
-			buildWorkerHandler(handlers.Router(), fwd).ServeHTTP(w, r)
+			inner = buildWorkerHandler(handlers.Router(), fwd)
 		}
+		identity.HostTrust(cfg.NodeHostname, inner).ServeHTTP(w, r)
 	})
 
 	listeners, err := bindListeners(ctx, cfg, overlayHandler, hostHandler)

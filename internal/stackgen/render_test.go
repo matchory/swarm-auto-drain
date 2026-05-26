@@ -71,6 +71,28 @@ func TestRender_InvalidServiceName(t *testing.T) {
 	}
 }
 
+func TestRender_HasResourceReservations(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, Options{Version: "v0.2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "reservations:") {
+		t.Errorf("rendered stack missing resource reservations:\n%s", out)
+	}
+}
+
+func TestRender_NetworkAttachableFalse(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, Options{Version: "v0.2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "attachable: false") {
+		t.Errorf("rendered stack missing `attachable: false`:\n%s", out)
+	}
+}
+
 func TestRender_PreservesGoTemplateLiteral(t *testing.T) {
 	// The stack template emits `{{.Node.Hostname}}` literally so swarm
 	// substitutes the node hostname at task-creation time. A regression

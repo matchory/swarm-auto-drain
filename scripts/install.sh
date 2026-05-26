@@ -19,8 +19,17 @@ case "$ARCH" in
   *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
 
-URL="https://github.com/matchory/swarm-auto-drain/releases/download/${VERSION}/swarm-auto-drain-linux-${ARCH}"
-SHA="https://github.com/matchory/swarm-auto-drain/releases/download/${VERSION}/swarm-auto-drain-linux-${ARCH}.sha256"
+# GitHub's "latest" alias lives at /releases/latest/download/, not
+# /releases/download/latest/. The version-pinned form goes via
+# /releases/download/${tag}/. Keep both paths working without
+# requiring the operator to know the difference.
+if [ "$VERSION" = "latest" ]; then
+  BASE="https://github.com/matchory/swarm-auto-drain/releases/latest/download"
+else
+  BASE="https://github.com/matchory/swarm-auto-drain/releases/download/${VERSION}"
+fi
+URL="${BASE}/swarm-auto-drain-linux-${ARCH}"
+SHA="${BASE}/swarm-auto-drain-linux-${ARCH}.sha256"
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT

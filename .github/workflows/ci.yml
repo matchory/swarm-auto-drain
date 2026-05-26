@@ -46,10 +46,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/matchory/swarm-auto-drain
+          # Pattern keeps the leading `v` so the pushed tag matches
+          # `git describe` and the `version` string the binary stamps
+          # in. `stack` renders `image: ...:v0.2.0`; the registry must
+          # carry that same tag or `docker stack deploy` fails with
+          # `manifest unknown`.
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}}
             type=sha,prefix=,format=short
       - uses: docker/build-push-action@v6
         with:
@@ -57,7 +62,11 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # github.ref_name is the literal git ref (tag `v0.2.0` or
+          # branch name) — pinning to it keeps the binary's `version`
+          # string identical to the image tag without relying on
+          # metadata-action's output-name semantics.
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

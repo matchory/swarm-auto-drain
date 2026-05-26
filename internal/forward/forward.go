@@ -106,15 +106,20 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		// 5xx — treat as a failed attempt so we re-probe; we still propagate
-		// the last 5xx response if we run out of retries.
-		if resp.StatusCode >= http.StatusInternalServerError && i < attempts-1 {
-			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("%w: %d", errUpstream5xx, resp.StatusCode)
+		// 5xx — treat as a failed attempt. We invalidate the cached
+		// manager URL on EVERY 5xx, including the last attempt that
+		// gets propagated to the caller; otherwise the next request
+		// would re-hit the same sick manager. If we have retries left,
+		// loop; otherwise fall through and stream the 5xx upstream.
+		if resp.StatusCode >= http.StatusInternalServerError {
 			if f.OnAttemptFailure != nil {
 				f.OnAttemptFailure()
 			}
-			continue
+			if i < attempts-1 {
+				_ = resp.Body.Close()
+				lastErr = fmt.Errorf("%w: %d", errUpstream5xx, resp.StatusCode)
+				continue
+			}
 		}
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)

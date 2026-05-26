@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -50,5 +51,12 @@ func TestNeedsReboot_StatError(t *testing.T) {
 	_, err := NeedsReboot(filepath.Join(dir, "file"))
 	if err == nil {
 		t.Fatal("want error from unreadable directory, got nil")
+	}
+}
+
+func TestNeedsReboot_EmptyPath(t *testing.T) {
+	_, err := NeedsReboot("")
+	if !errors.Is(err, ErrEmptyPath) {
+		t.Errorf("err = %v, want ErrEmptyPath", err)
 	}
 }

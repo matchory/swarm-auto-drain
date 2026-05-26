@@ -28,6 +28,13 @@ services:
         limits:
           cpus: "0.5"
           memory: 64M
+        # Reservations make the swarm scheduler account for the
+        # coordinator's footprint even on contended hosts — without
+        # them a mass-restart storm can squeeze the coordinator at
+        # exactly the moment its API needs to answer.
+        reservations:
+          cpus: "0.05"
+          memory: 16M
     environment:
       NODE_HOSTNAME: "{{`{{.Node.Hostname}}`}}"
       LOCK_TTL_SECONDS: "1800"
@@ -51,7 +58,12 @@ services:
 networks:
   {{.ServiceName}}-net:
     driver: overlay
+    # internal: not routable from the swarm ingress mesh.
     internal: true
+    # attachable: false blocks `docker network connect` from attaching
+    # arbitrary containers to the coordinator overlay — defense-in-depth
+    # layered on top of the IP-derived identity check.
+    attachable: false
 {{- if not .AllowUnencrypted }}
     driver_opts:
       encrypted: "true"

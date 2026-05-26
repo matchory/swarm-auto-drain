@@ -29,6 +29,11 @@ const (
 	defaultDrainTimeoutSecs  = 600
 	resumeSentinelDirMode    = 0o755
 	resumeSentinelFileMode   = 0o644
+	// drainContextSlack widens the client's drain context past the
+	// daemon-side DrainTimeout so a slow drain returns 408 from the
+	// daemon rather than a client-side deadline (which would surface as
+	// a bare network error, hiding the operational reason).
+	drainContextSlack = 30 * time.Second
 )
 
 // Reason values emitted on the structured `reason=` log field. Stable;
@@ -101,29 +106,35 @@ func triggerCmd(_ []string) int {
 	return exitCode
 }
 
-// runReboot owns the lock acquire → drain → reboot sequence with
-// deferred best-effort release. Pulled out so the exit-code-via-defer
-// trick reads cleanly.
+// runReboot owns the sentinel → lock → drain → reboot sequence.
+//
+// Two design rules keep the cluster invariant "lock held ⇔ a node is
+// draining or has committed to reboot" intact:
+//
+//  1. The resume sentinel is written BEFORE we acquire the lock, so a
+//     successful drain is always paired with a sentinel on disk.
+//     Otherwise a sentinel-write failure after drain would leave the
+//     node drained with no resume.service trigger, requiring manual
+//     intervention to re-activate.
+//  2. After a successful drain we DO NOT release the lock on the
+//     "reboot failed" path. Releasing would let a peer believe the
+//     cluster is free while this node is actually drained; on the next
+//     boot resume.service releases the lock via DELETE /lock. Errors
+//     before drain success do release the lock — we hadn't yet
+//     committed cluster-visible state.
+//
+// The 503 quorum-guard path explicitly releases the lock because we
+// never drained — staying held would stall the fleet for the full TTL.
 func runReboot(
 	ctx context.Context,
 	client *hostclient.Client,
 	lockTimeout, drainTimeout time.Duration,
 	resumeSentinel string,
-) (exitCode int) {
-	acquired := false
-	defer func() {
-		if !acquired || exitCode == 0 {
-			return
-		}
-		ctxRel, cancel := context.WithTimeout(context.Background(), lockTimeout)
-		defer cancel()
-		status, relErr := client.ReleaseLock(ctxRel)
-		if relErr != nil {
-			slog.Warn("best-effort lock release after error",
-				"err", relErr.Error(),
-				"status", status)
-		}
-	}()
+) int {
+	if err := writeResumeSentinel(resumeSentinel); err != nil {
+		slog.Error("write resume sentinel", "path", resumeSentinel, "err", err)
+		return 1
+	}
 
 	ctxLock, cancel := context.WithTimeout(ctx, lockTimeout)
 	res, err := client.AcquireLock(ctxLock)
@@ -134,7 +145,6 @@ func runReboot(
 	}
 	switch res.Status {
 	case http.StatusCreated, http.StatusGone:
-		acquired = true
 		slog.Info("lock acquired", "status", res.Status)
 	case http.StatusConflict:
 		slog.Info("skip", "reason", reasonLockHeldByPeer, "holder", res.Lock.Holder)
@@ -145,11 +155,12 @@ func runReboot(
 		return 1
 	}
 
-	ctxDrain, cancelDrain := context.WithTimeout(ctx, drainTimeout+30*time.Second)
+	ctxDrain, cancelDrain := context.WithTimeout(ctx, drainTimeout+drainContextSlack)
 	status, body, err := client.Drain(ctxDrain)
 	cancelDrain()
 	if err != nil {
 		slog.Error("drain", "err", err, "reason", reasonDrainFailed)
+		releaseBestEffort(client, lockTimeout)
 		return 1
 	}
 	switch status {
@@ -158,30 +169,46 @@ func runReboot(
 	case http.StatusRequestTimeout:
 		slog.Error("drain timed out",
 			"body", string(body), "reason", reasonDrainTimeout)
+		releaseBestEffort(client, lockTimeout)
 		return 1
 	case http.StatusServiceUnavailable:
 		slog.Info("skip", "reason", reasonQuorumGuard, "body", string(body))
+		releaseBestEffort(client, lockTimeout)
 		return 0
 	default:
 		slog.Error("drain status",
 			"status", status, "body", string(body), "reason", reasonDrainFailed)
+		releaseBestEffort(client, lockTimeout)
 		return 1
 	}
 
-	if err := writeResumeSentinel(resumeSentinel); err != nil {
-		slog.Error("write resume sentinel", "path", resumeSentinel, "err", err)
-		return 1
-	}
-
+	// Past this point the node is drained; the lock now stays held
+	// until resume.service releases it on the next boot. Any error here
+	// is a deferred problem the operator handles, not a "release and
+	// pretend it didn't happen" — releasing would expose the cluster to
+	// a peer starting its own drain while we're still alive.
 	slog.Info("rebooting", "reason", reasonRebooting)
 	if rebootErr := systemctlReboot(); rebootErr != nil {
 		slog.Error("systemctl reboot", "err", rebootErr)
 		return 1
 	}
 	// `systemctl reboot` schedules the reboot and returns; the kernel
-	// terminates us at its leisure during the shutdown sequence. A clean
-	// return means the dbus call succeeded.
+	// terminates us at its leisure during the shutdown sequence.
 	return 0
+}
+
+// releaseBestEffort tries to release the cluster lock. Failures are
+// logged but never propagated — the caller is already on an error path
+// and the lock will eventually be reclaimed via the stale-TTL mechanism.
+func releaseBestEffort(client *hostclient.Client, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	status, err := client.ReleaseLock(ctx)
+	if err != nil {
+		slog.Warn("best-effort lock release",
+			"err", err.Error(),
+			"status", status)
+	}
 }
 
 // loadTriggerPolicy reads policy-related env vars and parses the window.
