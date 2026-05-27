@@ -5,10 +5,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -17,6 +20,10 @@ import (
 )
 
 const meterName = "swarm-auto-drain"
+
+// defaultPushInterval is the OTLP PeriodicReader cadence used when
+// Config.PushInterval is unset or non-positive.
+const defaultPushInterval = 15 * time.Second
 
 // ShutdownFunc flushes both exporters with a caller-supplied budget.
 // A nil ShutdownFunc means there is nothing to flush.
@@ -57,7 +64,35 @@ func New(ctx context.Context, cfg Config) (Metrics, http.Handler, ShutdownFunc, 
 		promHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 	}
 
+	if cfg.OTLPEndpoint != "" {
+		// otlpmetrichttp.WithEndpoint expects host:port (no scheme); the
+		// config layer is responsible for stripping any URL form.
+		otlpExp, otlpErr := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpoint(cfg.OTLPEndpoint))
+		if otlpErr != nil {
+			return Metrics{}, nil, nil, fmt.Errorf("otlp exporter: %w", otlpErr)
+		}
+		interval := cfg.PushInterval
+		if interval <= 0 {
+			interval = defaultPushInterval
+		}
+		providerOpts = append(providerOpts, sdkmetric.WithReader(
+			sdkmetric.NewPeriodicReader(otlpExp, sdkmetric.WithInterval(interval)),
+		))
+	}
+
 	provider := sdkmetric.NewMeterProvider(providerOpts...)
+
+	// Register Go runtime instrumentation against the real provider only.
+	// The noop branch above returns before reaching this point — runtime
+	// metrics spin up their own goroutine and timer; no point paying that
+	// cost when the data goes nowhere.
+	if rtErr := runtime.Start(
+		runtime.WithMeterProvider(provider),
+		runtime.WithMinimumReadMemStatsInterval(time.Second),
+	); rtErr != nil {
+		return Metrics{}, nil, nil, fmt.Errorf("runtime instrumentation: %w", rtErr)
+	}
+
 	m, err := build(provider.Meter(meterName))
 	if err != nil {
 		return Metrics{}, nil, nil, fmt.Errorf("build instruments: %w", err)

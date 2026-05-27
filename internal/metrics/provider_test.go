@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
@@ -60,5 +61,57 @@ func TestNew_PromListener_ReturnsHandler(t *testing.T) {
 
 	if shutdownErr := shutdown(context.Background()); shutdownErr != nil {
 		t.Errorf("shutdown: %v", shutdownErr)
+	}
+}
+
+func TestNew_OTLPOnly_ReturnsShutdown(t *testing.T) {
+	cfg := metrics.Config{
+		OTLPEndpoint:   "127.0.0.1:1", // unreachable; we never push during the test
+		PushInterval:   60 * time.Second,
+		ServiceVersion: "v0-test",
+		NodeHostname:   "node-a",
+	}
+	m, handler, shutdown, err := metrics.New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if handler != nil {
+		t.Error("handler should be nil when no Prom listener configured")
+	}
+	if shutdown == nil {
+		t.Fatal("shutdown must be non-nil when OTLP reader attached")
+	}
+	if m.Drain.Total == nil {
+		t.Error("Metrics must be populated")
+	}
+	// Cancel quickly so the shutdown's PeriodicReader.ForceFlush doesn't
+	// dial the unreachable endpoint.
+	sCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_ = shutdown(sCtx) // error from unreachable endpoint is expected and tolerated
+}
+
+func TestNew_RuntimeMetricsRegisteredOnRealProvider(t *testing.T) {
+	cfg := metrics.Config{ListenAddr: ":0"}
+	_, handler, shutdown, err := metrics.New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := w.Body.String()
+	// Contrib's goroutine metric has been renamed across versions:
+	// process_runtime_go_goroutines (oldest), runtime_go_goroutines, and
+	// go_goroutine_count (v0.68+). Accept any of them.
+	if !strings.Contains(body, "process_runtime_go_goroutines") &&
+		!strings.Contains(body, "runtime_go_goroutines") &&
+		!strings.Contains(body, "go_goroutine_count") {
+		end := len(body)
+		if end > 500 {
+			end = 500
+		}
+		t.Errorf("expected runtime metrics in /metrics output; got:\n%s", body[:end])
 	}
 }
