@@ -140,7 +140,7 @@ All names are prefixed `swarm_auto_drain_`. Histograms use the `_seconds` suffix
 | Name | Type | Labels | Notes |
 |---|---|---|---|
 | `role` | gauge | — | `0=worker, 1=manager` |
-| `role_refresh_total` | counter | `trigger={periodic,error_recovery}, outcome={ok,error}` | Detector health |
+| `role_refresh_total` | counter | `trigger={periodic,error_recovery,manual}, outcome={ok,error}` | Detector health |
 | `role_transitions_total` | counter | `from,to ∈ {worker,manager}` | Promotion/demotion events |
 
 ### 4.4 Forward

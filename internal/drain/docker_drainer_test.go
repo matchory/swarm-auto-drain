@@ -203,6 +203,13 @@ func TestDockerDrainer_Drain_RecordsOkOutcome(t *testing.T) {
 	if metrics.FindHistogramCount(t, reader, "swarm_auto_drain.drain.duration") == 0 {
 		t.Error("expected duration histogram observation")
 	}
+	// tasks_remaining is updated each poll, then reset to 0 on exit (idle).
+	gauge := metrics.FindGauge(t, reader, "swarm_auto_drain.drain.tasks_remaining")
+	if len(gauge) == 0 {
+		t.Error("expected tasks_remaining gauge to be recorded")
+	} else if last := gauge[len(gauge)-1].Value; last != 0 {
+		t.Errorf("tasks_remaining after drain = %d, want 0 (reset on exit)", last)
+	}
 }
 
 func TestDockerDrainer_Drain_RecordsTimeout(t *testing.T) {
