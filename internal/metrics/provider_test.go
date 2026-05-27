@@ -91,6 +91,27 @@ func TestNew_OTLPOnly_ReturnsShutdown(t *testing.T) {
 	_ = shutdown(sCtx) // error from unreachable endpoint is expected and tolerated
 }
 
+func TestNew_OTLPEndpoint_AcceptsURLForm(t *testing.T) {
+	// The OTEL_EXPORTER_OTLP_ENDPOINT spec prescribes a scheme'd URL
+	// (http://host:port). New must accept that form, not just bare
+	// host:port, otherwise an operator following the standard silently
+	// pushes to a broken endpoint.
+	cfg := metrics.Config{
+		OTLPEndpoint: "http://127.0.0.1:1", // scheme'd; unreachable, never dialed
+		PushInterval: 60 * time.Second,
+	}
+	_, _, shutdown, err := metrics.New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New with scheme'd endpoint: %v", err)
+	}
+	if shutdown == nil {
+		t.Fatal("shutdown must be non-nil when OTLP reader attached")
+	}
+	sCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_ = shutdown(sCtx)
+}
+
 func TestNew_RuntimeMetricsRegisteredOnRealProvider(t *testing.T) {
 	cfg := metrics.Config{ListenAddr: ":0"}
 	_, handler, shutdown, err := metrics.New(context.Background(), cfg)

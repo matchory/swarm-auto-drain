@@ -120,10 +120,12 @@ func (d *DockerDrainer) Managers(ctx context.Context) (ManagersHealth, error) {
 // hits zero or the timeout elapses.
 func (d *DockerDrainer) Drain(ctx context.Context, node string, timeout, pollInterval time.Duration) (Result, error) {
 	start := time.Now()
-	defer func() {
-		d.Metrics.Duration.Record(ctx, time.Since(start).Seconds())
-		d.Metrics.TasksRemaining.Record(ctx, 0)
-	}()
+	// Record total drain duration on every exit. Deliberately do NOT reset
+	// TasksRemaining to 0 here: the clean (count==0) path already records 0
+	// in the poll loop, while the timeout/error paths must leave the last
+	// observed count standing so a stuck drain stays visible on the gauge
+	// rather than being masked as "idle".
+	defer func() { d.Metrics.Duration.Record(ctx, time.Since(start).Seconds()) }()
 	if err := d.Docker.NodeUpdate(ctx, node, "drain"); err != nil {
 		d.recordDrainOutcome(ctx, "error")
 		return Result{}, fmt.Errorf("set drain: %w", err)

@@ -26,8 +26,11 @@ var knownRoutes = map[string]string{
 }
 
 // Metrics wraps next with RED-style counter and histogram recording.
-// Install OUTSIDE AuditLog so the middleware overhead is itself
-// measured by the histogram.
+// It is installed inside Router (the innermost layer), so the histogram
+// measures handler latency only — the surrounding AuditLog and identity
+// middleware overhead is excluded, and requests rejected by identity
+// (400/503) never reach here and are not counted (identity.resolutions
+// captures those instead).
 func Metrics(next http.Handler, m metrics.HTTPMetrics) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sr := &statusRecorder{ResponseWriter: w, status: http.StatusOK}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -65,9 +66,17 @@ func New(ctx context.Context, cfg Config) (Metrics, http.Handler, ShutdownFunc, 
 	}
 
 	if cfg.OTLPEndpoint != "" {
-		// otlpmetrichttp.WithEndpoint expects host:port (no scheme); the
-		// config layer is responsible for stripping any URL form.
-		otlpExp, otlpErr := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpoint(cfg.OTLPEndpoint))
+		// Accept both the OTLP-standard URL form (e.g. http://collector:4318,
+		// which is what the OTEL_EXPORTER_OTLP_ENDPOINT spec prescribes) and a
+		// bare host:port. WithEndpointURL parses the scheme; WithEndpoint treats
+		// the value as host:port. Selecting on "://" honors either form so an
+		// operator who sets the conventional scheme'd value isn't silently
+		// pushing to a broken endpoint.
+		endpointOpt := otlpmetrichttp.WithEndpoint(cfg.OTLPEndpoint)
+		if strings.Contains(cfg.OTLPEndpoint, "://") {
+			endpointOpt = otlpmetrichttp.WithEndpointURL(cfg.OTLPEndpoint)
+		}
+		otlpExp, otlpErr := otlpmetrichttp.New(ctx, endpointOpt)
 		if otlpErr != nil {
 			return Metrics{}, nil, nil, fmt.Errorf("otlp exporter: %w", otlpErr)
 		}
