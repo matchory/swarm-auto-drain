@@ -13,6 +13,7 @@ import (
 	"github.com/matchory/swarm-auto-drain/internal/drain"
 	"github.com/matchory/swarm-auto-drain/internal/identity"
 	"github.com/matchory/swarm-auto-drain/internal/lock"
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 // Handlers wires the HTTP handlers onto their collaborators.
@@ -24,6 +25,7 @@ type Handlers struct {
 	// Version is the daemon binary's version string, surfaced in /role so
 	// host-side clients can detect daemon-vs-host skew. Empty when unset.
 	Version      string
+	HTTPMetrics  metrics.HTTPMetrics
 	LockTTL      time.Duration
 	DrainTimeout time.Duration
 	PollInterval time.Duration
@@ -38,7 +40,7 @@ func (h Handlers) Router() http.Handler {
 	mux.HandleFunc("/lock", h.lock)
 	mux.HandleFunc("/drain", h.drain)
 	mux.HandleFunc("/active", h.active)
-	return mux
+	return Metrics(mux, h.HTTPMetrics)
 }
 
 func (Handlers) healthz(w http.ResponseWriter, _ *http.Request) {

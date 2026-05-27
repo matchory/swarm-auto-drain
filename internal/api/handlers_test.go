@@ -13,6 +13,7 @@ import (
 	"github.com/matchory/swarm-auto-drain/internal/drain"
 	"github.com/matchory/swarm-auto-drain/internal/identity"
 	"github.com/matchory/swarm-auto-drain/internal/lock"
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 type fakeStore struct {
@@ -85,6 +86,7 @@ func newTestServer(t *testing.T, store lock.Store, dr drain.Drainer) *httptest.S
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		HTTPMetrics:  metrics.NewNoop().HTTP,
 	}
 	mw := identity.Middleware{NodeHostname: "self-host", PublicPaths: []string{"/healthz", "/role"}}
 	return httptest.NewServer(mw.Wrap(h.Router()))
@@ -136,6 +138,7 @@ func TestRole_VersionEcho(t *testing.T) {
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
 		Version:      "v0.2.0",
+		HTTPMetrics:  metrics.NewNoop().HTTP,
 	}
 	srv := httptest.NewServer(h.Router())
 	defer srv.Close()
@@ -308,6 +311,7 @@ func newAuthedRouter(store lock.Store, dr drain.Drainer, resolver identity.NodeR
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		HTTPMetrics:  metrics.NewNoop().HTTP,
 	}
 	mw := identity.Middleware{
 		NodeHostname: "self-host",
@@ -484,6 +488,7 @@ func TestUnixSocket_HostTrustEndToEnd(t *testing.T) {
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		HTTPMetrics:  metrics.NewNoop().HTTP,
 	}
 	// AllowMissingPeerCreds: these tests connect via DialContext without
 	// running through unixPeerCredConnContext, so no peer creds reach the
@@ -546,6 +551,7 @@ func TestUnixSocket_HostTrustOverridesAdversarialHeader(t *testing.T) {
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		HTTPMetrics:  metrics.NewNoop().HTTP,
 	}
 	// AllowMissingPeerCreds: these tests connect via DialContext without
 	// running through unixPeerCredConnContext, so no peer creds reach the
