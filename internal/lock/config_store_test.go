@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 type fakeDocker struct {
@@ -51,7 +53,12 @@ func (f *fakeDocker) ConfigRemove(_ context.Context, _ string) error {
 }
 
 func newStore(f *fakeDocker) *ConfigStore {
-	return &ConfigStore{Docker: f, ConfigName: "lock", Now: func() time.Time { return time.Unix(1000, 0) }}
+	return &ConfigStore{
+		Docker:     f,
+		ConfigName: "lock",
+		Now:        func() time.Time { return time.Unix(1000, 0) },
+		Metrics:    metrics.NewNoop().Lock,
+	}
 }
 
 func TestAcquire_FreshSuccess(t *testing.T) {
@@ -197,4 +204,152 @@ func TestIsNotFoundString(t *testing.T) {
 		t.Error("false positive")
 	}
 	_ = strings.Contains
+}
+
+func TestConfigStore_Acquire_MetricsAcquired(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeDocker{}
+	s := &ConfigStore{
+		Docker:     f,
+		Now:        func() time.Time { return time.Unix(1000, 0) },
+		ConfigName: "lock",
+		Metrics:    m.Lock,
+	}
+
+	if _, err := s.Acquire(context.Background(), "node-a", time.Minute); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.lock.acquire")
+	dp := metrics.PointWithAttrs(t, points, "outcome", "acquired")
+	if dp.Value != 1 {
+		t.Errorf("acquire counter = %d, want 1", dp.Value)
+	}
+	held := metrics.FindGauge(t, reader, "swarm_auto_drain.lock.held")
+	if len(held) == 0 || held[0].Value != 1 {
+		t.Errorf("held gauge = %+v, want value 1", held)
+	}
+}
+
+func TestConfigStore_Acquire_MetricsEexist(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeDocker{}
+	s := &ConfigStore{
+		Docker:     f,
+		Now:        func() time.Time { return time.Unix(1000, 0) },
+		ConfigName: "lock",
+		Metrics:    m.Lock,
+	}
+	if _, err := s.Acquire(context.Background(), "node-a", 30*time.Minute); err != nil {
+		t.Fatalf("seed Acquire: %v", err)
+	}
+
+	if _, err := s.Acquire(context.Background(), "node-b", 30*time.Minute); err != nil {
+		t.Fatalf("contended Acquire: %v", err)
+	}
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.lock.acquire")
+	dp := metrics.PointWithAttrs(t, points, "outcome", "eexist")
+	if dp.Value != 1 {
+		t.Errorf("eexist counter = %d, want 1", dp.Value)
+	}
+}
+
+func TestConfigStore_Acquire_MetricsStolen(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	now := time.Unix(10_000, 0)
+	stale := Lock{Holder: "node-a", AcquiredAt: now.Add(-time.Hour).Unix(), TTLSeconds: 10}
+	data, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	f := &fakeDocker{data: data, exists: true}
+	s := &ConfigStore{
+		Docker:     f,
+		Now:        func() time.Time { return now },
+		ConfigName: "lock",
+		Metrics:    m.Lock,
+	}
+
+	r, err := s.Acquire(context.Background(), "node-b", time.Minute)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if r.Status != AcquiredViaSteal {
+		t.Fatalf("status = %v, want AcquiredViaSteal", r.Status)
+	}
+
+	acquire := metrics.FindCounter(t, reader, "swarm_auto_drain.lock.acquire")
+	dp := metrics.PointWithAttrs(t, acquire, "outcome", "stolen")
+	if dp.Value != 1 {
+		t.Errorf("stolen counter = %d, want 1", dp.Value)
+	}
+	steals := metrics.FindCounter(t, reader, "swarm_auto_drain.lock.steals")
+	sdp := metrics.PointWithAttrs(t, steals, "reason", "ttl_expired")
+	if sdp.Value != 1 {
+		t.Errorf("steals counter = %d, want 1", sdp.Value)
+	}
+	held := metrics.FindGauge(t, reader, "swarm_auto_drain.lock.held")
+	if len(held) == 0 || held[0].Value != 1 {
+		t.Errorf("held gauge = %+v, want value 1", held)
+	}
+}
+
+func TestConfigStore_Release_MetricsReleased(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeDocker{}
+	tNow := time.Unix(1000, 0)
+	s := &ConfigStore{
+		Docker:     f,
+		Now:        func() time.Time { return tNow },
+		ConfigName: "lock",
+		Metrics:    m.Lock,
+	}
+	if _, err := s.Acquire(context.Background(), "node-a", time.Minute); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	// Advance the clock so the hold histogram observes a non-zero duration.
+	tNow = tNow.Add(5 * time.Second)
+
+	if err := s.Release(context.Background(), "node-a"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	rel := metrics.FindCounter(t, reader, "swarm_auto_drain.lock.release")
+	dp := metrics.PointWithAttrs(t, rel, "outcome", "released")
+	if dp.Value != 1 {
+		t.Errorf("released counter = %d, want 1", dp.Value)
+	}
+	if count := metrics.FindHistogramCount(t, reader, "swarm_auto_drain.lock.hold"); count != 1 {
+		t.Errorf("hold histogram count = %d, want 1", count)
+	}
+	held := metrics.FindGauge(t, reader, "swarm_auto_drain.lock.held")
+	// Latest gauge observation should be 0 after release.
+	if len(held) == 0 || held[len(held)-1].Value != 0 {
+		t.Errorf("held gauge after release = %+v, want value 0", held)
+	}
+}
+
+func TestConfigStore_Release_MetricsNotHolder(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeDocker{}
+	s := &ConfigStore{
+		Docker:     f,
+		Now:        func() time.Time { return time.Unix(1000, 0) },
+		ConfigName: "lock",
+		Metrics:    m.Lock,
+	}
+	if _, err := s.Acquire(context.Background(), "node-a", time.Minute); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	if err := s.Release(context.Background(), "node-b"); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("Release: err=%v, want ErrNotHolder", err)
+	}
+
+	rel := metrics.FindCounter(t, reader, "swarm_auto_drain.lock.release")
+	dp := metrics.PointWithAttrs(t, rel, "outcome", "not_holder")
+	if dp.Value != 1 {
+		t.Errorf("not_holder counter = %d, want 1", dp.Value)
+	}
 }

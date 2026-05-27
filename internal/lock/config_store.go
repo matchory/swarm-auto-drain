@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/errdefs"
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // docker is the subset of internal/docker.Client that ConfigStore needs.
@@ -26,6 +30,9 @@ type ConfigStore struct {
 	Docker     docker
 	Now        func() time.Time // Injectable for tests; nil → time.Now.
 	ConfigName string
+	Metrics    metrics.LockMetrics
+	holdStart  time.Time
+	holdMu     sync.Mutex
 }
 
 // Acquire takes the cluster lock for `holder` with the given TTL.
@@ -37,18 +44,59 @@ func (s *ConfigStore) Acquire(ctx context.Context, holder string, ttl time.Durat
 func (s *ConfigStore) Release(ctx context.Context, holder string) error {
 	existing, err := s.loadCurrent(ctx)
 	if errors.Is(err, ErrNoLock) {
+		s.recordReleaseOutcome(ctx, "not_found")
 		return ErrNoLock
 	}
 	if err != nil {
+		s.recordReleaseOutcome(ctx, "error")
 		return fmt.Errorf("inspect: %w", err)
 	}
 	if existing.Holder != holder {
+		s.recordReleaseOutcome(ctx, "not_holder")
 		return ErrNotHolder
 	}
 	if removeErr := s.Docker.ConfigRemove(ctx, s.ConfigName); removeErr != nil && !isNotFound(removeErr) {
+		s.recordReleaseOutcome(ctx, "error")
 		return fmt.Errorf("remove: %w", removeErr)
 	}
+	s.recordReleaseSuccess(ctx)
 	return nil
+}
+
+// recordAcquireOutcome increments the lock.acquire counter with the
+// outcome attribute. Centralised so every branch in tryAcquire records
+// with the same attribute shape.
+func (s *ConfigStore) recordAcquireOutcome(ctx context.Context, outcome string) {
+	s.Metrics.Acquire.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// recordReleaseOutcome increments the lock.release counter with the
+// outcome attribute, for the error/not-found/not-holder branches.
+func (s *ConfigStore) recordReleaseOutcome(ctx context.Context, outcome string) {
+	s.Metrics.Release.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// markHeld records the moment this replica took the lock. Paired with
+// recordReleaseSuccess to compute hold duration without observable
+// callbacks.
+func (s *ConfigStore) markHeld(at time.Time) {
+	s.holdMu.Lock()
+	s.holdStart = at
+	s.holdMu.Unlock()
+}
+
+// recordReleaseSuccess emits the released counter, the held=0 gauge,
+// and — if we have a recorded hold start — the hold-duration histogram.
+func (s *ConfigStore) recordReleaseSuccess(ctx context.Context) {
+	s.holdMu.Lock()
+	start := s.holdStart
+	s.holdStart = time.Time{}
+	s.holdMu.Unlock()
+	if !start.IsZero() {
+		s.Metrics.Hold.Record(ctx, time.Since(start).Seconds())
+	}
+	s.recordReleaseOutcome(ctx, "released")
+	s.Metrics.Held.Record(ctx, 0)
 }
 
 // Inspect returns the current Lock document, or ErrNoLock if no lock is held.
@@ -75,15 +123,20 @@ func (s *ConfigStore) tryAcquire(
 	// 1. Try a fresh create.
 	_, createErr := s.Docker.ConfigCreate(ctx, s.ConfigName, data, nil)
 	if createErr == nil {
+		s.markHeld(s.now())
+		s.recordAcquireOutcome(ctx, "acquired")
+		s.Metrics.Held.Record(ctx, 1)
 		return AcquireResult{Current: &doc, Status: Acquired}, nil
 	}
 	if !isAlreadyExists(createErr) {
+		s.recordAcquireOutcome(ctx, "error")
 		return AcquireResult{}, fmt.Errorf("create: %w", createErr)
 	}
 
 	// 2. EEXIST — read existing holder.
 	existing, inspectErr := s.loadCurrent(ctx)
 	if inspectErr != nil && !errors.Is(inspectErr, ErrNoLock) {
+		s.recordAcquireOutcome(ctx, "error")
 		return AcquireResult{}, fmt.Errorf("inspect after EEXIST: %w", inspectErr)
 	}
 	if existing == nil {
@@ -91,6 +144,7 @@ func (s *ConfigStore) tryAcquire(
 		// fresh-create path once; if it disappears again we treat the slot
 		// as contested rather than spin forever.
 		if retried {
+			s.recordAcquireOutcome(ctx, "eexist")
 			return AcquireResult{Current: nil, Status: HeldByOther}, nil
 		}
 		return s.tryAcquire(ctx, holder, ttl, true)
@@ -98,11 +152,13 @@ func (s *ConfigStore) tryAcquire(
 
 	// 3. Same holder retrying — idempotent re-acquire.
 	if existing.Holder == holder {
+		s.recordAcquireOutcome(ctx, "acquired")
 		return AcquireResult{Current: existing, Status: Acquired}, nil
 	}
 
 	// 4. Held by someone else, still fresh.
 	if s.now().UTC().Unix()-existing.AcquiredAt <= int64(existing.TTLSeconds) {
+		s.recordAcquireOutcome(ctx, "eexist")
 		return AcquireResult{Current: existing, Status: HeldByOther}, nil
 	}
 
@@ -112,10 +168,12 @@ func (s *ConfigStore) tryAcquire(
 	// believe they hold the cluster-wide mutex.
 	confirmed, confirmErr := s.loadCurrent(ctx)
 	if confirmErr != nil && !errors.Is(confirmErr, ErrNoLock) {
+		s.recordAcquireOutcome(ctx, "error")
 		return AcquireResult{}, fmt.Errorf("re-inspect before steal: %w", confirmErr)
 	}
 	if confirmed == nil {
 		if retried {
+			s.recordAcquireOutcome(ctx, "eexist")
 			return AcquireResult{Current: nil, Status: HeldByOther}, nil
 		}
 		return s.tryAcquire(ctx, holder, ttl, true)
@@ -123,18 +181,25 @@ func (s *ConfigStore) tryAcquire(
 	if confirmed.Holder != existing.Holder || confirmed.AcquiredAt != existing.AcquiredAt {
 		// Lock was replaced between inspect and re-inspect. Report whoever
 		// now holds it instead of risking a wrong remove.
+		s.recordAcquireOutcome(ctx, "eexist")
 		return AcquireResult{Current: confirmed, Status: HeldByOther}, nil
 	}
 
 	// 6. Confirmed stale — remove + recreate.
 	if removeErr := s.Docker.ConfigRemove(ctx, s.ConfigName); removeErr != nil && !isNotFound(removeErr) {
+		s.recordAcquireOutcome(ctx, "error")
 		return AcquireResult{}, fmt.Errorf("remove stale: %w", removeErr)
 	}
 	_, recreateErr := s.Docker.ConfigCreate(ctx, s.ConfigName, data, nil)
 	if recreateErr == nil {
+		s.markHeld(s.now())
+		s.recordAcquireOutcome(ctx, "stolen")
+		s.Metrics.Steals.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("reason", "ttl_expired")))
+		s.Metrics.Held.Record(ctx, 1)
 		return AcquireResult{Current: &doc, Status: AcquiredViaSteal}, nil
 	}
 	if !isAlreadyExists(recreateErr) {
+		s.recordAcquireOutcome(ctx, "error")
 		return AcquireResult{}, fmt.Errorf("create after steal: %w", recreateErr)
 	}
 	// A peer beat us to the recreate. Best-effort report of the winner; an
@@ -143,6 +208,7 @@ func (s *ConfigStore) tryAcquire(
 	if winnerErr != nil && !errors.Is(winnerErr, ErrNoLock) {
 		winner = nil
 	}
+	s.recordAcquireOutcome(ctx, "eexist")
 	return AcquireResult{Current: winner, Status: HeldByOther}, nil
 }
 
