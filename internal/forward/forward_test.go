@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 func TestForward_AddsOriginNodeHeader(t *testing.T) {
@@ -26,6 +28,7 @@ func TestForward_AddsOriginNodeHeader(t *testing.T) {
 		OriginNode:     "node-a",
 		FindManagerURL: func() (string, error) { return mgr.URL, nil },
 		Client:         &http.Client{Timeout: time.Second},
+		Metrics:        metrics.NewNoop().Forward,
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/lock", strings.NewReader(`{"x":1}`))
@@ -48,6 +51,7 @@ func TestForward_NoManagerFound(t *testing.T) {
 		OriginNode:     "node-a",
 		FindManagerURL: func() (string, error) { return "", errNoManagerForTest },
 		Client:         &http.Client{Timeout: time.Second},
+		Metrics:        metrics.NewNoop().Forward,
 	}
 	req := httptest.NewRequest(http.MethodGet, "/lock", http.NoBody)
 	rr := httptest.NewRecorder()
@@ -76,6 +80,7 @@ func TestForward_ManagerUnreachableInvalidatesCache(t *testing.T) {
 		},
 		Client:  &http.Client{Timeout: 200 * time.Millisecond},
 		Retries: 2,
+		Metrics: metrics.NewNoop().Forward,
 	}
 	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
 	rr := httptest.NewRecorder()
@@ -103,6 +108,7 @@ func TestForward_StripsHopByHopHeaders(t *testing.T) {
 		OriginNode:     "n",
 		FindManagerURL: func() (string, error) { return mgr.URL, nil },
 		Client:         &http.Client{Timeout: time.Second},
+		Metrics:        metrics.NewNoop().Forward,
 	}
 	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	req.Header.Set("Transfer-Encoding", "chunked")
@@ -133,6 +139,7 @@ func TestForward_OnAttemptFailureCalled(t *testing.T) {
 		OnAttemptFailure: func() { atomic.AddInt32(&failures, 1) },
 		Client:           &http.Client{Timeout: 100 * time.Millisecond},
 		Retries:          2,
+		Metrics:          metrics.NewNoop().Forward,
 	}
 	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	rr := httptest.NewRecorder()
@@ -150,3 +157,63 @@ var errNoManagerForTest = testError("no manager available")
 type testError string
 
 func (e testError) Error() string { return string(e) }
+
+func TestForwarder_RecordsAttemptOk(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	mgr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mgr.Close()
+
+	f := &Forwarder{
+		OriginNode:     "node-a",
+		FindManagerURL: func() (string, error) { return mgr.URL, nil },
+		Client:         &http.Client{Timeout: time.Second},
+		Metrics:        m.Forward,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
+	f.ServeHTTP(httptest.NewRecorder(), req)
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.forward.attempts")
+	dp := metrics.PointWithAttrs(t, points, "outcome", "ok")
+	if dp.Value != 1 {
+		t.Errorf("forward.attempts{outcome=ok} = %d, want 1", dp.Value)
+	}
+	if count := metrics.FindHistogramCount(t, reader, "swarm_auto_drain.forward.duration"); count < 1 {
+		t.Errorf("forward.duration observations = %d, want >= 1", count)
+	}
+}
+
+func TestForwarder_RecordsAttemptConnectError(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &Forwarder{
+		OriginNode:     "node-a",
+		FindManagerURL: func() (string, error) { return "", ErrNoManager },
+		Client:         &http.Client{Timeout: time.Second},
+		Metrics:        m.Forward,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
+	f.ServeHTTP(httptest.NewRecorder(), req)
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.forward.attempts")
+	dp := metrics.PointWithAttrs(t, points, "outcome", "connect_error")
+	if dp.Value < 1 {
+		t.Errorf("forward.attempts{outcome=connect_error} = %d, want >= 1", dp.Value)
+	}
+}
+
+func TestManagerFinder_RecordsInvalidation(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	mf := &ManagerFinder{Metrics: m.Forward}
+	mf.Invalidate()
+	mf.Invalidate()
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.forward.cache_invalidations")
+	var total int64
+	for _, p := range points {
+		total += p.Value
+	}
+	if total != 2 {
+		t.Errorf("cache_invalidations total = %d, want 2", total)
+	}
+}

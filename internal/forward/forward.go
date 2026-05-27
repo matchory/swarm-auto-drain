@@ -14,6 +14,10 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // hop-by-hop headers (RFC 7230 §6.1) that an intermediary MUST strip and not
@@ -65,12 +69,18 @@ type Forwarder struct {
 	OnAttemptFailure func()
 	Client           *http.Client
 	OriginNode       string
+	Metrics          metrics.ForwardMetrics
 	Retries          int // 1 attempt + Retries extra attempts; default 0 (one attempt).
 }
 
 // ServeHTTP proxies the inbound request to a manager replica, retrying on
 // connection failure or 5xx responses.
 func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		f.Metrics.Duration.Record(r.Context(), time.Since(start).Seconds())
+	}()
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
@@ -83,6 +93,7 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		base, findErr := f.FindManagerURL()
 		if findErr != nil {
 			lastErr = findErr
+			f.recordAttempt(r.Context(), "connect_error")
 			if f.OnAttemptFailure != nil {
 				f.OnAttemptFailure()
 			}
@@ -101,6 +112,7 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp, doErr := f.Client.Do(req)
 		if doErr != nil {
 			lastErr = doErr
+			f.recordAttempt(r.Context(), classifyDoError(doErr))
 			if f.OnAttemptFailure != nil {
 				f.OnAttemptFailure()
 			}
@@ -112,6 +124,7 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// would re-hit the same sick manager. If we have retries left,
 		// loop; otherwise fall through and stream the 5xx upstream.
 		if resp.StatusCode >= http.StatusInternalServerError {
+			f.recordAttempt(r.Context(), "http_5xx")
 			if f.OnAttemptFailure != nil {
 				f.OnAttemptFailure()
 			}
@@ -120,6 +133,8 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lastErr = fmt.Errorf("%w: %d", errUpstream5xx, resp.StatusCode)
 				continue
 			}
+		} else {
+			f.recordAttempt(r.Context(), "ok")
 		}
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
@@ -130,6 +145,19 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, fmt.Sprintf("no manager available: %v", lastErr), http.StatusServiceUnavailable)
 }
 
+// recordAttempt increments the attempts counter with the given outcome.
+func (f *Forwarder) recordAttempt(ctx context.Context, outcome string) {
+	f.Metrics.Attempts.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// classifyDoError maps an http.Client.Do error to an attempts-counter outcome.
+func classifyDoError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "connect_error"
+}
+
 // ManagerFinder discovers manager replicas via DNS lookup of the
 // service's overlay DNS name, then probes /role on each to find ones in
 // manager mode. Results are cached.
@@ -138,6 +166,7 @@ type ManagerFinder struct {
 	Client     *http.Client
 	ServiceDNS string
 	cached     string
+	Metrics    metrics.ForwardMetrics
 	mu         sync.Mutex
 	TTL        time.Duration
 	Port       int
@@ -184,6 +213,11 @@ func (m *ManagerFinder) Invalidate() {
 	m.mu.Lock()
 	m.cached = ""
 	m.mu.Unlock()
+	// context.Background() is intentional: Invalidate is called from
+	// synchronous places (the forwarder's OnAttemptFailure callback) that
+	// don't thread a parent context through. Cache invalidation is
+	// noise-level signal and doesn't need request-bound tracing.
+	m.Metrics.CacheInvalidations.Add(context.Background(), 1)
 }
 
 // probe issues a short-deadline GET /role to base and reports whether the peer
