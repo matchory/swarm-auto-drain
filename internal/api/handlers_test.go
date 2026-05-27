@@ -87,6 +87,7 @@ func newTestServer(t *testing.T, store lock.Store, dr drain.Drainer) *httptest.S
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
 		HTTPMetrics:  metrics.NewNoop().HTTP,
+		DrainMetrics: metrics.NewNoop().Drain,
 	}
 	mw := identity.Middleware{NodeHostname: "self-host", PublicPaths: []string{"/healthz", "/role"}}
 	return httptest.NewServer(mw.Wrap(h.Router()))
@@ -139,6 +140,7 @@ func TestRole_VersionEcho(t *testing.T) {
 		Role:         func() string { return "manager" },
 		Version:      "v0.2.0",
 		HTTPMetrics:  metrics.NewNoop().HTTP,
+		DrainMetrics: metrics.NewNoop().Drain,
 	}
 	srv := httptest.NewServer(h.Router())
 	defer srv.Close()
@@ -238,6 +240,32 @@ func TestDrain_QuorumFail(t *testing.T) {
 	}
 }
 
+func TestDrain_QuorumFail_RecordsMetric(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	h := Handlers{
+		Store:        &fakeStore{},
+		Drainer:      &fakeDrainer{quorumOK: false, quorumRep: drain.QuorumReport{TotalManagers: 3, OthersReachable: 1, Required: 2}},
+		LockTTL:      30 * time.Minute,
+		DrainTimeout: time.Second,
+		PollInterval: 10 * time.Millisecond,
+		Role:         func() string { return "manager" },
+		HTTPMetrics:  m.HTTP,
+		DrainMetrics: m.Drain,
+	}
+	mw := identity.Middleware{NodeHostname: "self-host", PublicPaths: []string{"/healthz", "/role"}}
+	srv := httptest.NewServer(mw.Wrap(h.Router()))
+	defer srv.Close()
+	resp, _ := http.Post(srv.URL+"/drain", "application/json", nil)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.drain.total")
+	dp := metrics.PointWithAttrs(t, points, "outcome", "quorum_fail")
+	if dp.Value != 1 {
+		t.Errorf("drain_total{outcome=quorum_fail} value = %d, want 1", dp.Value)
+	}
+}
+
 func TestDrain_Happy(t *testing.T) {
 	srv := newTestServer(t, &fakeStore{}, &fakeDrainer{
 		quorumOK: true,
@@ -312,6 +340,7 @@ func newAuthedRouter(store lock.Store, dr drain.Drainer, resolver identity.NodeR
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
 		HTTPMetrics:  metrics.NewNoop().HTTP,
+		DrainMetrics: metrics.NewNoop().Drain,
 	}
 	mw := identity.Middleware{
 		NodeHostname: "self-host",
@@ -489,6 +518,7 @@ func TestUnixSocket_HostTrustEndToEnd(t *testing.T) {
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
 		HTTPMetrics:  metrics.NewNoop().HTTP,
+		DrainMetrics: metrics.NewNoop().Drain,
 	}
 	// AllowMissingPeerCreds: these tests connect via DialContext without
 	// running through unixPeerCredConnContext, so no peer creds reach the
@@ -552,6 +582,7 @@ func TestUnixSocket_HostTrustOverridesAdversarialHeader(t *testing.T) {
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
 		HTTPMetrics:  metrics.NewNoop().HTTP,
+		DrainMetrics: metrics.NewNoop().Drain,
 	}
 	// AllowMissingPeerCreds: these tests connect via DialContext without
 	// running through unixPeerCredConnContext, so no peer creds reach the

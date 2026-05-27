@@ -14,6 +14,8 @@ import (
 	"github.com/matchory/swarm-auto-drain/internal/identity"
 	"github.com/matchory/swarm-auto-drain/internal/lock"
 	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // Handlers wires the HTTP handlers onto their collaborators.
@@ -26,6 +28,7 @@ type Handlers struct {
 	// host-side clients can detect daemon-vs-host skew. Empty when unset.
 	Version      string
 	HTTPMetrics  metrics.HTTPMetrics
+	DrainMetrics metrics.DrainMetrics
 	LockTTL      time.Duration
 	DrainTimeout time.Duration
 	PollInterval time.Duration
@@ -139,6 +142,7 @@ func (h Handlers) drain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		h.DrainMetrics.Total.Add(r.Context(), 1, otelmetric.WithAttributes(attribute.String("outcome", "quorum_fail")))
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"error":  "manager quorum would be lost",
 			"report": rep,

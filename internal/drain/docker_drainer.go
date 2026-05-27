@@ -4,6 +4,10 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // reachableState is the value Docker reports for a manager that's in raft
@@ -33,7 +37,8 @@ type docker interface {
 
 // DockerDrainer is the Drainer implementation backed by the Docker SDK.
 type DockerDrainer struct {
-	Docker docker
+	Docker  docker
+	Metrics metrics.DrainMetrics
 }
 
 // QuorumOK reports whether draining `self` would preserve raft quorum and
@@ -53,6 +58,7 @@ func (d *DockerDrainer) QuorumOK(ctx context.Context, self string) (bool, Quorum
 		}
 	}
 	if !isManager {
+		d.recordQuorumResult(ctx, "ok")
 		return true, QuorumReport{
 			TotalManagers:     len(nodes),
 			ReachableManagers: 0,
@@ -82,6 +88,11 @@ func (d *DockerDrainer) QuorumOK(ctx context.Context, self string) (bool, Quorum
 	}
 	// To preserve raft quorum after self drains, OthersReachable must be >= Required.
 	ok := rep.OthersReachable >= rep.Required
+	result := "ok"
+	if !ok {
+		result = "fail"
+	}
+	d.recordQuorumResult(ctx, result)
 	return ok, rep, nil
 }
 
@@ -108,24 +119,34 @@ func (d *DockerDrainer) Managers(ctx context.Context) (ManagersHealth, error) {
 // Drain sets the node's availability to "drain" and polls until task count
 // hits zero or the timeout elapses.
 func (d *DockerDrainer) Drain(ctx context.Context, node string, timeout, pollInterval time.Duration) (Result, error) {
+	start := time.Now()
+	defer func() {
+		d.Metrics.Duration.Record(ctx, time.Since(start).Seconds())
+		d.Metrics.TasksRemaining.Record(ctx, 0)
+	}()
 	if err := d.Docker.NodeUpdate(ctx, node, "drain"); err != nil {
+		d.recordDrainOutcome(ctx, "error")
 		return Result{}, fmt.Errorf("set drain: %w", err)
 	}
-	start := time.Now()
 	deadline := start.Add(timeout)
 	for {
 		count, err := d.Docker.NodeTaskCount(ctx, node)
 		if err != nil {
+			d.recordDrainOutcome(ctx, "error")
 			return Result{}, fmt.Errorf("poll tasks: %w", err)
 		}
+		d.Metrics.TasksRemaining.Record(ctx, int64(count))
 		if count == 0 {
+			d.recordDrainOutcome(ctx, "ok")
 			return Result{TasksRemaining: 0, Elapsed: time.Since(start), TimedOut: false}, nil
 		}
 		if time.Now().After(deadline) {
+			d.recordDrainOutcome(ctx, "timeout")
 			return Result{TasksRemaining: count, Elapsed: time.Since(start), TimedOut: true}, nil
 		}
 		select {
 		case <-ctx.Done():
+			d.recordDrainOutcome(ctx, "error")
 			return Result{}, fmt.Errorf("drain context: %w", ctx.Err())
 		case <-time.After(pollInterval):
 		}
@@ -138,4 +159,14 @@ func (d *DockerDrainer) Activate(ctx context.Context, node string) error {
 		return fmt.Errorf("set active: %w", err)
 	}
 	return nil
+}
+
+// recordDrainOutcome increments drain_total{outcome=...}.
+func (d *DockerDrainer) recordDrainOutcome(ctx context.Context, outcome string) {
+	d.Metrics.Total.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// recordQuorumResult increments quorum_check_total{result=...}.
+func (d *DockerDrainer) recordQuorumResult(ctx context.Context, result string) {
+	d.Metrics.QuorumCheck.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("result", result)))
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 type fakeNode struct {
@@ -20,6 +22,7 @@ type fakeDocker struct {
 	updateErr   error
 	updateCalls []string
 	tasks       []int
+	lastTask    int
 }
 
 func (f *fakeDocker) NodeList(_ context.Context, filters map[string][]string) ([]NodeSummary, error) {
@@ -44,10 +47,11 @@ func (f *fakeDocker) NodeUpdate(_ context.Context, node, avail string) error {
 
 func (f *fakeDocker) NodeTaskCount(_ context.Context, _ string) (int, error) {
 	if len(f.tasks) == 0 {
-		return 0, nil
+		return f.lastTask, nil
 	}
 	n := f.tasks[0]
 	f.tasks = f.tasks[1:]
+	f.lastTask = n
 	return n, nil
 }
 
@@ -58,7 +62,7 @@ func TestQuorumOK_WorkerAlwaysPasses(t *testing.T) {
 		{Hostname: "m3", Role: "manager", Reachability: "unreachable"},
 		{Hostname: "w1", Role: "worker", Reachability: ""},
 	}}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	ok, _, err := d.QuorumOK(context.Background(), "w1")
 	if err != nil || !ok {
 		t.Fatalf("worker quorum: ok=%v err=%v", ok, err)
@@ -71,7 +75,7 @@ func TestQuorumOK_ManagerWith2Others(t *testing.T) {
 		{Hostname: "m2", Role: "manager", Reachability: "reachable"},
 		{Hostname: "m3", Role: "manager", Reachability: "reachable"},
 	}}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	ok, rep, err := d.QuorumOK(context.Background(), "m1")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -90,7 +94,7 @@ func TestQuorumOK_ManagerWithOnly1Other(t *testing.T) {
 		{Hostname: "m2", Role: "manager", Reachability: "reachable"},
 		{Hostname: "m3", Role: "manager", Reachability: "unreachable"},
 	}}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	ok, rep, err := d.QuorumOK(context.Background(), "m1")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -102,7 +106,7 @@ func TestQuorumOK_ManagerWithOnly1Other(t *testing.T) {
 
 func TestDrain_HappyPath(t *testing.T) {
 	f := &fakeDocker{tasks: []int{3, 1, 0}}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	res, err := d.Drain(context.Background(), "w1", time.Second, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
@@ -117,7 +121,7 @@ func TestDrain_HappyPath(t *testing.T) {
 
 func TestDrain_Timeout(t *testing.T) {
 	f := &fakeDocker{tasks: []int{5, 5, 5, 5, 5, 5, 5, 5}}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	res, err := d.Drain(context.Background(), "w1", 50*time.Millisecond, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
@@ -129,7 +133,7 @@ func TestDrain_Timeout(t *testing.T) {
 
 func TestActivate(t *testing.T) {
 	f := &fakeDocker{}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	if err := d.Activate(context.Background(), "w1"); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
@@ -145,7 +149,7 @@ func TestManagers(t *testing.T) {
 		{Hostname: "m3", Role: "manager", Reachability: "unreachable"},
 		{Hostname: "w1", Role: "worker", Reachability: ""},
 	}}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	h, err := d.Managers(context.Background())
 	if err != nil {
 		t.Fatalf("Managers: %v", err)
@@ -157,9 +161,61 @@ func TestManagers(t *testing.T) {
 
 func TestDrain_UpdateError(t *testing.T) {
 	f := &fakeDocker{updateErr: errors.New("forbidden")}
-	d := &DockerDrainer{Docker: f}
+	d := &DockerDrainer{Docker: f, Metrics: metrics.NewNoop().Drain}
 	_, err := d.Drain(context.Background(), "w1", time.Second, 10*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error when NodeUpdate fails")
+	}
+}
+
+func TestDockerDrainer_QuorumCheck_RecordsOk(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeDocker{nodes: []fakeNode{
+		{Hostname: "self", Role: "manager", Reachability: "reachable"},
+		{Hostname: "m2", Role: "manager", Reachability: "reachable"},
+		{Hostname: "m3", Role: "manager", Reachability: "reachable"},
+	}}
+	d := &DockerDrainer{Docker: f, Metrics: m.Drain}
+	ok, _, err := d.QuorumOK(context.Background(), "self")
+	if err != nil || !ok {
+		t.Fatalf("QuorumOK ok=%v err=%v", ok, err)
+	}
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.drain.quorum_check")
+	dp := metrics.PointWithAttrs(t, points, "result", "ok")
+	if dp.Value != 1 {
+		t.Errorf("quorum_check{result=ok} value = %d, want 1", dp.Value)
+	}
+}
+
+func TestDockerDrainer_Drain_RecordsOkOutcome(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeDocker{tasks: []int{2, 1, 0}}
+	d := &DockerDrainer{Docker: f, Metrics: m.Drain}
+	_, err := d.Drain(context.Background(), "self", time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.drain.total")
+	dp := metrics.PointWithAttrs(t, points, "outcome", "ok")
+	if dp.Value != 1 {
+		t.Errorf("drain_total{outcome=ok} value = %d, want 1", dp.Value)
+	}
+	if metrics.FindHistogramCount(t, reader, "swarm_auto_drain.drain.duration") == 0 {
+		t.Error("expected duration histogram observation")
+	}
+}
+
+func TestDockerDrainer_Drain_RecordsTimeout(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeDocker{tasks: []int{5}} // repeats 5 once exhausted
+	d := &DockerDrainer{Docker: f, Metrics: m.Drain}
+	_, err := d.Drain(context.Background(), "self", 5*time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.drain.total")
+	dp := metrics.PointWithAttrs(t, points, "outcome", "timeout")
+	if dp.Value != 1 {
+		t.Errorf("drain_total{outcome=timeout} value = %d, want 1", dp.Value)
 	}
 }
