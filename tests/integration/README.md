@@ -16,13 +16,18 @@ docker compose -f tests/integration/docker-compose.yml down -v
 - Docker Config CAS: concurrent `docker config create` of the same name
   succeeds for exactly one caller; the other gets `AlreadyExists`.
 - Node availability state transitions (drain ↔ active).
+- Metrics: the coordinator is deployed onto the dind swarm with
+  `METRICS_LISTEN_ADDR=:9100`, and `:9100/metrics` is scraped to confirm it
+  serves Prometheus output including `swarm_auto_drain_lock_acquire_total`
+  after a lock acquire.
 
 ## What they do NOT cover (yet)
 
-- The coordinator binary itself end-to-end. That requires deploying
-  the swarm-auto-drain stack onto the dind swarm and is left as
-  follow-up. The Go unit tests cover the binary's logic; this fixture
-  primarily validates the assumptions about how the Docker SDK behaves.
+- The coordinator's full request flow (worker → manager forwarding, drain,
+  quorum guard). The metrics test deploys the binary and exercises a single
+  loopback `/lock`, but the broader HTTP contract is covered by the Go unit
+  tests; this fixture primarily validates assumptions about how the Docker
+  SDK behaves.
 
 ## CI
 

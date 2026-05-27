@@ -72,6 +72,11 @@ func run(cfg *config.Config) error {
 	defer cancel()
 
 	role := dockerpkg.NewRoleDetector(dcli, cfg.RoleRecheck)
+	// The initial Refresh records into role.Metrics, but the real provider
+	// isn't built until after it (metrics.New needs the resulting role as a
+	// resource attr). Seed noop instruments first so the initial Refresh
+	// can't nil-panic; mtr.Role replaces them below before role.Run starts.
+	role.Metrics = metrics.NewNoop().Role
 	if refreshErr := role.Refresh(ctx); refreshErr != nil {
 		return fmt.Errorf("initial docker info: %w", refreshErr)
 	}
