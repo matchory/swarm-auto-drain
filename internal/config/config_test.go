@@ -158,3 +158,62 @@ func TestLoad_BadInteger(t *testing.T) {
 		t.Fatal("expected error for non-numeric LOCK_TTL_SECONDS")
 	}
 }
+
+func TestLoad_MetricsListenAddr_DefaultEmpty(t *testing.T) {
+	t.Setenv("NODE_HOSTNAME", "node-a")
+	t.Setenv("METRICS_LISTEN_ADDR", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MetricsListenAddr != "" {
+		t.Errorf("default should be empty, got %q", cfg.MetricsListenAddr)
+	}
+}
+
+func TestLoad_MetricsListenAddr_FromEnv(t *testing.T) {
+	t.Setenv("NODE_HOSTNAME", "node-a")
+	t.Setenv("METRICS_LISTEN_ADDR", ":9100")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MetricsListenAddr != ":9100" {
+		t.Errorf("got %q want :9100", cfg.MetricsListenAddr)
+	}
+}
+
+func TestLoad_OTLPEndpoint_FromEnv(t *testing.T) {
+	t.Setenv("NODE_HOSTNAME", "node-a")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "collector.observability:4318")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OTLPEndpoint != "collector.observability:4318" {
+		t.Errorf("got %q", cfg.OTLPEndpoint)
+	}
+}
+
+func TestLoad_MetricsPushInterval_DefaultFifteen(t *testing.T) {
+	t.Setenv("NODE_HOSTNAME", "node-a")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MetricsPushInterval != 15*time.Second {
+		t.Errorf("default should be 15s, got %v", cfg.MetricsPushInterval)
+	}
+}
+
+func TestLoad_MetricsPushInterval_FromEnv(t *testing.T) {
+	t.Setenv("NODE_HOSTNAME", "node-a")
+	t.Setenv("METRICS_PUSH_INTERVAL_SECONDS", "30")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MetricsPushInterval != 30*time.Second {
+		t.Errorf("got %v want 30s", cfg.MetricsPushInterval)
+	}
+}

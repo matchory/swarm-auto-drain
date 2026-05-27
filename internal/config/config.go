@@ -17,6 +17,7 @@ const (
 	defaultRoleRecheck         = 30 * time.Second
 	defaultForwardTimeout      = 60 * time.Second
 	defaultManagerDiscoveryTTL = 60 * time.Second
+	defaultMetricsPushInterval = 15 * time.Second
 	// DefaultUnixSocketMode is intentionally group-readable/writable so
 	// the host-side script's runtime user (typically a dedicated group
 	// like `swarm-coord`) can call the coordinator without being root.
@@ -59,11 +60,14 @@ type Config struct {
 	DockerSocket            string
 	LockConfigName          string
 	LogLevel                string
+	MetricsListenAddr       string // empty disables Prom /metrics listener
+	OTLPEndpoint            string // empty disables OTLP push
 	LockTTL                 time.Duration
 	DrainTimeout            time.Duration
 	RoleRecheck             time.Duration
 	ForwardTimeout          time.Duration
 	ManagerDiscoveryTTL     time.Duration
+	MetricsPushInterval     time.Duration
 	UnixSocketGID           int
 	UnixSocketMode          os.FileMode
 	AllowUnencryptedOverlay bool
@@ -97,6 +101,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	metricsPushInterval, err := envSecs("METRICS_PUSH_INTERVAL_SECONDS", defaultMetricsPushInterval)
+	if err != nil {
+		return nil, err
+	}
 	unixSocketMode, err := envOctal("UNIX_SOCKET_MODE", defaultUnixSocketMode)
 	if err != nil {
 		return nil, err
@@ -113,11 +121,14 @@ func Load() (*Config, error) {
 		DockerSocket:            envStr("DOCKER_SOCKET", "/var/run/docker.sock"),
 		LockConfigName:          envStr("LOCK_CONFIG_NAME", "swarm-auto-drain-lock"),
 		LogLevel:                envStr("LOG_LEVEL", "info"),
+		MetricsListenAddr:       envStr("METRICS_LISTEN_ADDR", ""),
+		OTLPEndpoint:            envStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		LockTTL:                 lockTTL,
 		DrainTimeout:            drainTimeout,
 		RoleRecheck:             roleRecheck,
 		ForwardTimeout:          forwardTimeout,
 		ManagerDiscoveryTTL:     managerDiscoveryTTL,
+		MetricsPushInterval:     metricsPushInterval,
 		UnixSocketMode:          unixSocketMode,
 		UnixSocketGID:           unixSocketGID,
 		AllowUnencryptedOverlay: envBool("ALLOW_UNENCRYPTED_OVERLAY"),
