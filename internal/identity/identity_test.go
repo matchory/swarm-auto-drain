@@ -10,7 +10,14 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
+
+// noopIdentity is the Metrics field every Middleware literal in this
+// file needs. Recording goes nowhere; tests that assert on metrics
+// build their own ManualReader-backed Metrics via metrics.NewManualHarness.
+var noopIdentity = metrics.NewNoop().Identity //nolint:gochecknoglobals // test-only fixture
 
 // fakeResolver lets tests stub NodeResolver without spinning up the swarm
 // lookup machinery. Invalidations counts force-refresh calls; lookupAfterInvalidate
@@ -46,7 +53,7 @@ func (f *fakeResolver) Invalidate() {
 }
 
 func TestMiddleware_LoopbackUsesNodeHostname(t *testing.T) {
-	mw := Middleware{NodeHostname: "test-host"}
+	mw := Middleware{NodeHostname: "test-host", Metrics: noopIdentity}
 
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -67,7 +74,7 @@ func TestMiddleware_LoopbackUsesNodeHostname(t *testing.T) {
 }
 
 func TestMiddleware_LoopbackIPv6(t *testing.T) {
-	mw := Middleware{NodeHostname: "test-host"}
+	mw := Middleware{NodeHostname: "test-host", Metrics: noopIdentity}
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		got = FromContext(r.Context())
@@ -85,6 +92,7 @@ func TestMiddleware_OverlayResolverDerivesIdentity(t *testing.T) {
 	mw := Middleware{
 		NodeHostname: "manager-1",
 		Resolver:     &fakeResolver{byIP: map[string]string{"10.0.0.42": "worker-3"}},
+		Metrics:      noopIdentity,
 	}
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -108,6 +116,7 @@ func TestMiddleware_OverlayWorksWithoutHeader(t *testing.T) {
 	mw := Middleware{
 		NodeHostname: "manager-1",
 		Resolver:     &fakeResolver{byIP: map[string]string{"10.0.0.42": "worker-3"}},
+		Metrics:      noopIdentity,
 	}
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -126,7 +135,7 @@ func TestMiddleware_OverlayMismatchTriggersRefreshThenRejects(t *testing.T) {
 	// Persistent mismatch (no IP recycle): refresh once, still mismatch,
 	// reject with 503 so forward.Forwarder retries.
 	fr := &fakeResolver{byIP: map[string]string{"10.0.0.42": "worker-3"}}
-	mw := Middleware{NodeHostname: "manager-1", Resolver: fr}
+	mw := Middleware{NodeHostname: "manager-1", Resolver: fr, Metrics: noopIdentity}
 	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run on persistent mismatch")
 	}))
@@ -151,7 +160,7 @@ func TestMiddleware_OverlayMismatchHealsAfterIPRecycle(t *testing.T) {
 		byIP:                  map[string]string{"10.0.0.42": "worker-3"},
 		lookupAfterInvalidate: map[string]string{"10.0.0.42": "worker-7"},
 	}
-	mw := Middleware{NodeHostname: "manager-1", Resolver: fr}
+	mw := Middleware{NodeHostname: "manager-1", Resolver: fr, Metrics: noopIdentity}
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		got = FromContext(r.Context())
@@ -175,6 +184,7 @@ func TestMiddleware_OverlayUnknownIPIs503(t *testing.T) {
 	mw := Middleware{
 		NodeHostname: "manager-1",
 		Resolver:     &fakeResolver{byIP: map[string]string{"10.0.0.42": "worker-3"}},
+		Metrics:      noopIdentity,
 	}
 	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run for unknown IP")
@@ -190,7 +200,7 @@ func TestMiddleware_OverlayUnknownIPIs503(t *testing.T) {
 
 func TestMiddleware_OverlayWithoutResolverIs400(t *testing.T) {
 	// Manager misconfigured: no resolver. NOT transient — return 400.
-	mw := Middleware{NodeHostname: "manager-1"}
+	mw := Middleware{NodeHostname: "manager-1", Metrics: noopIdentity}
 	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run without resolver on overlay path")
 	}))
@@ -209,6 +219,7 @@ func TestMiddleware_OverlayResolverErrorIs503(t *testing.T) {
 	mw := Middleware{
 		NodeHostname: "manager-1",
 		Resolver:     &fakeResolver{err: errors.New("docker socket down")},
+		Metrics:      noopIdentity,
 	}
 	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run when resolver fails")
@@ -228,7 +239,7 @@ func TestMiddleware_LoopbackIgnoresXOriginNode(t *testing.T) {
 	// compromised script cannot trick the local replica into acting on
 	// another node's behalf. We assert FromContext returns NODE_HOSTNAME,
 	// not the (adversarial) header value.
-	mw := Middleware{NodeHostname: "self-host"}
+	mw := Middleware{NodeHostname: "self-host", Metrics: noopIdentity}
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		got = FromContext(r.Context())
@@ -248,7 +259,7 @@ func TestMiddleware_IgnoresXForwardedFor(t *testing.T) {
 	// to be classified as loopback. The middleware must read RemoteAddr
 	// only — any proxy-style header on the wire is ignored.
 	fr := &fakeResolver{byIP: map[string]string{"10.0.0.42": "worker-3"}}
-	mw := Middleware{NodeHostname: "manager-1", Resolver: fr}
+	mw := Middleware{NodeHostname: "manager-1", Resolver: fr, Metrics: noopIdentity}
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		got = FromContext(r.Context())
@@ -268,7 +279,7 @@ func TestMiddleware_MalformedRemoteAddrIs400(t *testing.T) {
 	// SplitHostPort fails on garbage RemoteAddr (no port separator).
 	// Config error, not transient — return 400 so the forwarder doesn't
 	// pointlessly retry.
-	mw := Middleware{NodeHostname: "manager-1", Resolver: &fakeResolver{}}
+	mw := Middleware{NodeHostname: "manager-1", Resolver: &fakeResolver{}, Metrics: noopIdentity}
 	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run for malformed RemoteAddr")
 	}))
@@ -285,7 +296,7 @@ func TestMiddleware_NonNumericHostIs400(t *testing.T) {
 	// SplitHostPort succeeds on "host:port" syntax even if the host is a
 	// DNS name; net.ParseIP then returns nil. Reject explicitly — only
 	// numeric IPs are valid sources because the resolver indexes by IP.
-	mw := Middleware{NodeHostname: "manager-1", Resolver: &fakeResolver{}}
+	mw := Middleware{NodeHostname: "manager-1", Resolver: &fakeResolver{}, Metrics: noopIdentity}
 	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("handler must not run for non-numeric host")
 	}))
@@ -303,7 +314,7 @@ func TestMiddleware_EmptyHeaderTreatedAsAbsent(t *testing.T) {
 	// not as a mismatch against the derived value. Otherwise a peer
 	// could trip an unnecessary cache invalidation on every request.
 	fr := &fakeResolver{byIP: map[string]string{"10.0.0.42": "worker-3"}}
-	mw := Middleware{NodeHostname: "manager-1", Resolver: fr}
+	mw := Middleware{NodeHostname: "manager-1", Resolver: fr, Metrics: noopIdentity}
 	var got string
 	h := mw.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		got = FromContext(r.Context())
@@ -336,7 +347,7 @@ func TestMiddleware_PublicPathsBypassMalformedRemoteAddr(t *testing.T) {
 	// /healthz and /role must succeed even from a malformed RemoteAddr —
 	// the wait loop on the host script must never get stuck on identity
 	// resolution failures for endpoints that don't use identity.
-	mw := Middleware{NodeHostname: "manager-1", PublicPaths: []string{"/healthz"}}
+	mw := Middleware{NodeHostname: "manager-1", PublicPaths: []string{"/healthz"}, Metrics: noopIdentity}
 	h := mw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -536,7 +547,7 @@ func TestHostTrust_OverridesPreExistingContextIdentity(t *testing.T) {
 }
 
 func TestMiddleware_PublicEndpointsBypass(t *testing.T) {
-	mw := Middleware{NodeHostname: "manager-1", PublicPaths: []string{"/healthz", "/role"}}
+	mw := Middleware{NodeHostname: "manager-1", PublicPaths: []string{"/healthz", "/role"}, Metrics: noopIdentity}
 	h := mw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -550,5 +561,49 @@ func TestMiddleware_PublicEndpointsBypass(t *testing.T) {
 	id := FromContext(context.Background())
 	if id != "" {
 		t.Errorf("FromContext on bare context = %q, want empty", id)
+	}
+}
+
+func TestMiddleware_RecordsLoopbackOk(t *testing.T) {
+	// Loopback happy path: the resolutions counter must record exactly one
+	// {source=loopback, outcome=ok} event so dashboards can split host-script
+	// traffic from overlay traffic.
+	reader, mset := metrics.NewManualHarness(t)
+	mw := Middleware{NodeHostname: "self-host", Metrics: mset.Identity}
+	h := mw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	r := httptest.NewRequest(http.MethodPost, "/lock", http.NoBody)
+	r.RemoteAddr = "127.0.0.1:55555"
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.identity.resolutions")
+	dp := metrics.PointWithAttrs(t, points, "source", "loopback", "outcome", "ok")
+	if dp.Value != 1 {
+		t.Errorf("count = %d, want 1", dp.Value)
+	}
+}
+
+func TestMiddleware_RecordsOverlayMismatch(t *testing.T) {
+	// Persistent header/IP mismatch: even after the forced invalidate the
+	// derived value still disagrees with X-Origin-Node. Counter records
+	// once per Wrap call, classifying the source as overlay (set from the
+	// RemoteAddr, not from the resolved identity) and the outcome as
+	// mismatch.
+	reader, mset := metrics.NewManualHarness(t)
+	fr := &fakeResolver{byIP: map[string]string{"10.0.0.2": "node-b"}}
+	mw := Middleware{NodeHostname: "manager-1", Resolver: fr, Metrics: mset.Identity}
+	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler must not run on persistent mismatch")
+	}))
+	r := httptest.NewRequest(http.MethodPost, "/drain", http.NoBody)
+	r.RemoteAddr = "10.0.0.2:33333"
+	r.Header.Set("X-Origin-Node", "node-impersonator")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.identity.resolutions")
+	dp := metrics.PointWithAttrs(t, points, "source", "overlay", "outcome", "mismatch")
+	if dp.Value != 1 {
+		t.Errorf("count = %d, want 1", dp.Value)
 	}
 }

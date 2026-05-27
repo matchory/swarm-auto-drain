@@ -15,9 +15,14 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 type ctxKey struct{}
@@ -41,8 +46,9 @@ type NodeResolver interface {
 // Field order puts interface/slice fields first to shrink the GC scan window.
 type Middleware struct {
 	Resolver     NodeResolver
-	NodeHostname string
 	PublicPaths  []string
+	Metrics      metrics.IdentityMetrics
+	NodeHostname string
 }
 
 // Wrap returns an http.Handler that resolves the caller identity and
@@ -58,7 +64,11 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		id, status, err := m.resolve(r)
+		id, source, status, err := m.resolve(r)
+		m.Metrics.Resolutions.Add(r.Context(), 1, otelmetric.WithAttributes(
+			attribute.String("source", source),
+			attribute.String("outcome", outcomeFor(err)),
+		))
 		if err != nil {
 			// G706 false positive: slog emits attrs as structured JSON, not
 			// printf-style — the untrusted header value cannot inject log lines.
@@ -75,47 +85,70 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
 	})
 }
 
-// resolve returns (identity, 0, nil) on success. On failure, status is
-// the HTTP code the caller should send back — 503 for transient causes
-// the forwarder can retry, 400 for permanent caller/config errors.
-func (m Middleware) resolve(r *http.Request) (string, int, error) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return "", http.StatusBadRequest, errBadRemote
+// resolve returns (identity, source, 0, nil) on success. On failure,
+// status is the HTTP code the caller should send back — 503 for
+// transient causes the forwarder can retry, 400 for permanent
+// caller/config errors. source is "loopback" or "overlay" and reflects
+// the RemoteAddr classification, not the resolved identity. A
+// malformed RemoteAddr that fails before classification falls into
+// "overlay" — loopback parses cleanly, so anything broken came from
+// the overlay (or untrusted) path.
+func (m Middleware) resolve(r *http.Request) (id, source string, status int, err error) {
+	host, _, perr := net.SplitHostPort(r.RemoteAddr)
+	if perr != nil {
+		return "", "overlay", http.StatusBadRequest, errBadRemote
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return "", http.StatusBadRequest, errBadRemote
+		return "", "overlay", http.StatusBadRequest, errBadRemote
 	}
 	if ip.IsLoopback() {
-		return m.NodeHostname, 0, nil
+		return m.NodeHostname, "loopback", 0, nil
 	}
+	source = "overlay"
 	if m.Resolver == nil {
-		return "", http.StatusBadRequest, errNoResolver
+		return "", source, http.StatusBadRequest, errNoResolver
 	}
 
-	derived, err := m.Resolver.NodeForOverlayIP(r.Context(), ip.String())
-	if err != nil {
-		return "", http.StatusServiceUnavailable, err
+	derived, rerr := m.Resolver.NodeForOverlayIP(r.Context(), ip.String())
+	if rerr != nil {
+		return "", source, http.StatusServiceUnavailable, rerr
 	}
 
 	claimed := r.Header.Get("X-Origin-Node")
 	if claimed == "" || claimed == derived {
-		return derived, 0, nil
+		return derived, source, 0, nil
 	}
 
 	// Mismatch. Could be a libnetwork IP recycle within our TTL — the
 	// previous owner of this overlay IP died and a different task picked
 	// it up. Force-refresh and re-check once before rejecting.
 	m.Resolver.Invalidate()
-	derived, err = m.Resolver.NodeForOverlayIP(r.Context(), ip.String())
-	if err != nil {
-		return "", http.StatusServiceUnavailable, err
+	derived, rerr = m.Resolver.NodeForOverlayIP(r.Context(), ip.String())
+	if rerr != nil {
+		return "", source, http.StatusServiceUnavailable, rerr
 	}
 	if claimed != derived {
-		return "", http.StatusServiceUnavailable, &mismatchError{claimed: claimed, derived: derived}
+		return "", source, http.StatusServiceUnavailable, &mismatchError{claimed: claimed, derived: derived}
 	}
-	return derived, 0, nil
+	return derived, source, 0, nil
+}
+
+// outcomeFor classifies a resolve error for the resolutions counter.
+// "mismatch" is a header/IP disagreement that survived an Invalidate;
+// everything else that errored is bucketed as "unknown_ip" — including
+// malformed remote addrs and resolver socket errors. The counter is
+// load-bearing for alerting, not forensics; the slog line above carries
+// the precise reason for an operator.
+func outcomeFor(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var me *mismatchError
+	if errors.As(err, &me) {
+		return "mismatch"
+	}
+	return "unknown_ip"
 }
 
 type stringError string
