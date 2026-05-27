@@ -89,7 +89,11 @@ func newTestServer(t *testing.T, store lock.Store, dr drain.Drainer) *httptest.S
 		HTTPMetrics:  metrics.NewNoop().HTTP,
 		DrainMetrics: metrics.NewNoop().Drain,
 	}
-	mw := identity.Middleware{NodeHostname: "self-host", PublicPaths: []string{"/healthz", "/role"}}
+	mw := identity.Middleware{
+		NodeHostname: "self-host",
+		PublicPaths:  []string{"/healthz", "/role"},
+		Metrics:      metrics.NewNoop().Identity,
+	}
 	return httptest.NewServer(mw.Wrap(h.Router()))
 }
 
@@ -252,7 +256,11 @@ func TestDrain_QuorumFail_RecordsMetric(t *testing.T) {
 		HTTPMetrics:  m.HTTP,
 		DrainMetrics: m.Drain,
 	}
-	mw := identity.Middleware{NodeHostname: "self-host", PublicPaths: []string{"/healthz", "/role"}}
+	mw := identity.Middleware{
+		NodeHostname: "self-host",
+		PublicPaths:  []string{"/healthz", "/role"},
+		Metrics:      metrics.NewNoop().Identity,
+	}
 	srv := httptest.NewServer(mw.Wrap(h.Router()))
 	defer srv.Close()
 	resp, _ := http.Post(srv.URL+"/drain", "application/json", nil)
@@ -346,6 +354,7 @@ func newAuthedRouter(store lock.Store, dr drain.Drainer, resolver identity.NodeR
 		NodeHostname: "self-host",
 		PublicPaths:  []string{"/healthz", "/role"},
 		Resolver:     resolver,
+		Metrics:      metrics.NewNoop().Identity,
 	}
 	return mw.Wrap(h.Router())
 }

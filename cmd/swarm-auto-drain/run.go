@@ -21,6 +21,7 @@ import (
 	"github.com/matchory/swarm-auto-drain/internal/identity"
 	"github.com/matchory/swarm-auto-drain/internal/lock"
 	"github.com/matchory/swarm-auto-drain/internal/logging"
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 const (
@@ -31,6 +32,9 @@ const (
 	managerProbeClient = 3 * time.Second
 	forwardRetries     = 2
 	shutdownGraceExtra = 30 * time.Second
+	// Bounds the metric provider's final flush so a stuck OTLP exporter
+	// can't block process exit indefinitely.
+	metricsShutdownGrace = 5 * time.Second
 	// SocketParentDirMode is the permission mode the coordinator stamps
 	// on the bind-mounted Unix-socket directory. 0750 lets the
 	// UNIX_SOCKET_GID group enter the directory; rwx for owner is
@@ -71,6 +75,21 @@ func run(cfg *config.Config) error {
 	if refreshErr := role.Refresh(ctx); refreshErr != nil {
 		return fmt.Errorf("initial docker info: %w", refreshErr)
 	}
+
+	// Build the metric provider now that the initial role is known
+	// (InitialRole is a resource attr). Both readers default off, so this
+	// falls back to a noop-backed Metrics unless METRICS_LISTEN_ADDR or
+	// OTEL_EXPORTER_OTLP_ENDPOINT is set — domain code records safely
+	// either way.
+	mtr, metricsHandler, metricsShutdown, err := metrics.New(ctx, metricsConfig(cfg, role.Role().String()))
+	if err != nil {
+		return fmt.Errorf("metrics: %w", err)
+	}
+	defer shutdownMetrics(metricsShutdown)
+
+	// Set role.Metrics before go role.Run so the detector's early ticks
+	// don't record into a nil instrument.
+	role.Metrics = mtr.Role
 	go role.Run(ctx)
 
 	// Self-discover our swarm service name. Required by identity verification
@@ -111,8 +130,8 @@ func run(cfg *config.Config) error {
 	// Now field intentionally left as the package's default (time.Now);
 	// tests inject a fake via the package directly.
 	//nolint:exhaustruct // Now defaults to time.Now
-	store := &lock.ConfigStore{Docker: dcli, ConfigName: cfg.LockConfigName}
-	drainer := &drain.DockerDrainer{Docker: dockerAdapter{dcli}}
+	store := &lock.ConfigStore{Docker: dcli, ConfigName: cfg.LockConfigName, Metrics: mtr.Lock}
+	drainer := &drain.DockerDrainer{Docker: dockerAdapter{dcli}, Metrics: mtr.Drain}
 
 	handlers := api.Handlers{
 		Store:        store,
@@ -122,14 +141,17 @@ func run(cfg *config.Config) error {
 		PollInterval: pollIntervalDrain,
 		Role:         func() string { return role.Role().String() },
 		Version:      version,
+		HTTPMetrics:  mtr.HTTP,
+		DrainMetrics: mtr.Drain,
 	}
 	// TTL defaults to defaultResolverTTL (5s) inside the resolver.
 	//nolint:exhaustruct // TTL has a sensible default
 	resolver := &identity.SwarmResolver{Docker: dcli, ServiceName: serviceName}
 	mw := identity.Middleware{
 		NodeHostname: cfg.NodeHostname,
-		PublicPaths:  []string{"/healthz", "/role"},
+		PublicPaths:  []string{"/healthz", "/role", "/metrics"},
 		Resolver:     resolver,
+		Metrics:      mtr.Identity,
 	}
 
 	finder := &forward.ManagerFinder{
@@ -137,6 +159,7 @@ func run(cfg *config.Config) error {
 		Port:       managerProbePort,
 		Client:     &http.Client{Timeout: managerProbeClient},
 		TTL:        cfg.ManagerDiscoveryTTL,
+		Metrics:    mtr.Forward,
 	}
 	fwd := &forward.Forwarder{
 		OriginNode:       cfg.NodeHostname,
@@ -144,6 +167,7 @@ func run(cfg *config.Config) error {
 		OnAttemptFailure: finder.Invalidate,
 		Client:           &http.Client{Timeout: cfg.ForwardTimeout},
 		Retries:          forwardRetries,
+		Metrics:          mtr.Forward,
 	}
 
 	// Two handler trees, one per listener — each carries its own trust
@@ -184,7 +208,7 @@ func run(cfg *config.Config) error {
 		identity.HostTrust(cfg.NodeHostname, inner).ServeHTTP(w, r)
 	})
 
-	listeners, err := bindListeners(ctx, cfg, overlayHandler, hostHandler)
+	listeners, err := bindListeners(ctx, cfg, overlayHandler, hostHandler, metricsHandler)
 	if err != nil {
 		return err
 	}
@@ -196,12 +220,39 @@ func run(cfg *config.Config) error {
 	slog.Info("listening",
 		"tcp", cfg.ListenAddr,
 		"unix", cfg.UnixSocketPath,
+		"metrics", cfg.MetricsListenAddr,
 		"initial_role", role.Role().String(),
 	)
 	if runErr := srv.Run(ctx); runErr != nil {
 		return fmt.Errorf("server: %w", runErr)
 	}
 	return nil
+}
+
+// metricsConfig assembles the metrics provider config from the daemon
+// config plus the startup role snapshot (a resource attribute).
+func metricsConfig(cfg *config.Config, initialRole string) metrics.Config {
+	return metrics.Config{
+		ListenAddr:     cfg.MetricsListenAddr,
+		OTLPEndpoint:   cfg.OTLPEndpoint,
+		PushInterval:   cfg.MetricsPushInterval,
+		ServiceVersion: version,
+		NodeHostname:   cfg.NodeHostname,
+		InitialRole:    initialRole,
+	}
+}
+
+// shutdownMetrics flushes the metric provider on daemon exit with a
+// bounded budget. A nil shutdown func (no readers configured) is a no-op.
+func shutdownMetrics(shutdown metrics.ShutdownFunc) {
+	if shutdown == nil {
+		return
+	}
+	sCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownGrace)
+	defer cancel()
+	if err := shutdown(sCtx); err != nil {
+		slog.Warn("metrics shutdown", "err", err)
+	}
 }
 
 // bindListeners opens both production listeners (overlay TCP + host
@@ -216,7 +267,7 @@ func run(cfg *config.Config) error {
 // equivalent kernel-side peer-credential mechanism, and the overlay
 // path uses IP-derived identity instead.
 func bindListeners(
-	ctx context.Context, cfg *config.Config, overlay, host http.Handler,
+	ctx context.Context, cfg *config.Config, overlay, host, metricsH http.Handler,
 ) ([]api.ListenerSpec, error) {
 	var lc net.ListenConfig
 	tcpLn, err := lc.Listen(ctx, "tcp", cfg.ListenAddr)
@@ -228,11 +279,25 @@ func bindListeners(
 		_ = tcpLn.Close()
 		return nil, fmt.Errorf("unix listen %s: %w", cfg.UnixSocketPath, err)
 	}
-	return []api.ListenerSpec{
+	specs := []api.ListenerSpec{
 		//nolint:exhaustruct // overlay TCP doesn't use ConnContext (no peer creds on TCP)
 		{Name: "overlay-tcp", Listener: tcpLn, Handler: overlay},
 		{Name: "host-unix", Listener: unixLn, Handler: host, ConnContext: unixPeerCredConnContext},
-	}, nil
+	}
+	// Metrics listener binds only when METRICS_LISTEN_ADDR is set and a
+	// real (non-noop) Prometheus handler exists. The OTLP-push-only path
+	// produces a nil handler and skips this listener entirely.
+	if cfg.MetricsListenAddr != "" && metricsH != nil {
+		metricsLn, mErr := lc.Listen(ctx, "tcp", cfg.MetricsListenAddr)
+		if mErr != nil {
+			_ = tcpLn.Close()
+			_ = unixLn.Close()
+			return nil, fmt.Errorf("metrics listen %s: %w", cfg.MetricsListenAddr, mErr)
+		}
+		//nolint:exhaustruct // metrics listener doesn't use ConnContext (no peer creds on TCP)
+		specs = append(specs, api.ListenerSpec{Name: "metrics", Listener: metricsLn, Handler: metricsH})
+	}
+	return specs, nil
 }
 
 // unixPeerCredConnContext is the http.Server ConnContext we install on
