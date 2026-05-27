@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/system"
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 type fakeClient struct {
@@ -66,6 +67,7 @@ func workerInfo() system.Info {
 func TestRoleDetector_Initial(t *testing.T) {
 	f := &fakeClient{info: managerInfo()}
 	d := NewRoleDetector(f, time.Hour)
+	d.Metrics = metrics.NewNoop().Role
 
 	if err := d.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
@@ -78,6 +80,7 @@ func TestRoleDetector_Initial(t *testing.T) {
 func TestRoleDetector_TransitionOnRefresh(t *testing.T) {
 	f := &fakeClient{info: managerInfo()}
 	d := NewRoleDetector(f, time.Hour)
+	d.Metrics = metrics.NewNoop().Role
 	_ = d.Refresh(context.Background())
 
 	f.mu.Lock()
@@ -93,6 +96,7 @@ func TestRoleDetector_TransitionOnRefresh(t *testing.T) {
 func TestRoleDetector_RefreshErrorKeepsLastRole(t *testing.T) {
 	f := &fakeClient{info: managerInfo()}
 	d := NewRoleDetector(f, time.Hour)
+	d.Metrics = metrics.NewNoop().Role
 	_ = d.Refresh(context.Background())
 
 	f.mu.Lock()
@@ -103,5 +107,62 @@ func TestRoleDetector_RefreshErrorKeepsLastRole(t *testing.T) {
 	}
 	if got := d.Role(); got != RoleManager {
 		t.Errorf("Role = %v, want manager (last known)", got)
+	}
+}
+
+func TestRoleDetector_Refresh_RecordsOk(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeClient{info: managerInfo()}
+	d := NewRoleDetector(f, time.Hour)
+	d.Metrics = m.Role
+
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.role.refresh")
+	dp := metrics.PointWithAttrs(t, points, "trigger", "manual", "outcome", "ok")
+	if dp.Value != 1 {
+		t.Errorf("refresh counter = %d, want 1", dp.Value)
+	}
+	gauge := metrics.FindGauge(t, reader, "swarm_auto_drain.role")
+	if len(gauge) == 0 || gauge[0].Value != 1 {
+		t.Errorf("role gauge = %+v, want value 1", gauge)
+	}
+}
+
+func TestRoleDetector_Refresh_RecordsTransition(t *testing.T) {
+	reader, m := metrics.NewManualHarness(t)
+	f := &fakeClient{info: workerInfo()}
+	d := NewRoleDetector(f, time.Hour)
+	d.Metrics = m.Role
+
+	// First refresh: RoleUnknown -> RoleWorker. Must NOT be counted as a transition.
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh 1: %v", err)
+	}
+
+	f.mu.Lock()
+	f.info = managerInfo()
+	f.mu.Unlock()
+
+	// Second refresh: RoleWorker -> RoleManager. Counts as a transition.
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh 2: %v", err)
+	}
+
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.role.transitions")
+	dp := metrics.PointWithAttrs(t, points, "from", "worker", "to", "manager")
+	if dp.Value != 1 {
+		t.Errorf("transition counter = %d, want 1", dp.Value)
+	}
+	// Total across all attribute sets must be exactly 1 — the first
+	// RoleUnknown -> RoleWorker step is excluded by design.
+	var total int64
+	for _, p := range points {
+		total += p.Value
+	}
+	if total != 1 {
+		t.Errorf("total transitions = %d, want 1 (unknown->worker must not count)", total)
 	}
 }

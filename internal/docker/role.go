@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/system"
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // Role identifies whether the local node currently acts as a swarm manager or worker.
@@ -48,6 +51,8 @@ type RoleDetector struct {
 	client   roleInfoer
 	interval time.Duration
 
+	Metrics metrics.RoleMetrics
+
 	mu   sync.RWMutex
 	role Role
 }
@@ -73,18 +78,53 @@ func (d *RoleDetector) Role() Role {
 // previously-cached role is preserved (transient Docker outages should not
 // force a worker to start thinking it's a manager, or vice versa).
 func (d *RoleDetector) Refresh(ctx context.Context) error {
+	return d.refreshWithTrigger(ctx, "manual")
+}
+
+// RefreshFromErrorRecovery is the entry point used by WithRoleRefresh's
+// synchronous, error-triggered refresh path. Tagged with a distinct
+// trigger so observers can distinguish lazy recovery from periodic polling.
+func (d *RoleDetector) RefreshFromErrorRecovery(ctx context.Context) error {
+	return d.refreshWithTrigger(ctx, "error_recovery")
+}
+
+func (d *RoleDetector) refreshWithTrigger(ctx context.Context, trigger string) error {
 	info, err := d.client.Info(ctx)
 	if err != nil {
+		d.Metrics.Refresh.Add(ctx, 1, otelmetric.WithAttributes(
+			attribute.String("trigger", trigger),
+			attribute.String("outcome", "error"),
+		))
 		return fmt.Errorf("docker info: %w", err)
 	}
-	role := RoleWorker
+	newRole := RoleWorker
 	if info.Swarm.ControlAvailable {
-		role = RoleManager
+		newRole = RoleManager
 	}
 	d.mu.Lock()
-	d.role = role
+	prev := d.role
+	d.role = newRole
 	d.mu.Unlock()
+
+	d.Metrics.Refresh.Add(ctx, 1, otelmetric.WithAttributes(
+		attribute.String("trigger", trigger),
+		attribute.String("outcome", "ok"),
+	))
+	d.Metrics.Current.Record(ctx, roleAsGaugeValue(newRole))
+	if prev != RoleUnknown && prev != newRole {
+		d.Metrics.Transitions.Add(ctx, 1, otelmetric.WithAttributes(
+			attribute.String("from", prev.String()),
+			attribute.String("to", newRole.String()),
+		))
+	}
 	return nil
+}
+
+func roleAsGaugeValue(r Role) int64 {
+	if r == RoleManager {
+		return 1
+	}
+	return 0
 }
 
 // Run blocks until ctx is canceled, refreshing on the configured interval.
@@ -97,7 +137,7 @@ func (d *RoleDetector) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := d.Refresh(ctx); err != nil {
+			if err := d.refreshWithTrigger(ctx, "periodic"); err != nil {
 				slog.Debug("role refresh failed", "err", err)
 			}
 		}

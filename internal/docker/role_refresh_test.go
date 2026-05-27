@@ -13,7 +13,7 @@ type fakeRefresher struct {
 	err   error
 }
 
-func (f *fakeRefresher) Refresh(_ context.Context) error {
+func (f *fakeRefresher) RefreshFromErrorRecovery(_ context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++

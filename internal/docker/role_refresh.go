@@ -38,7 +38,7 @@ func IsNotSwarmManager(err error) bool {
 // *RoleDetector; declared as an interface so the decorator can be tested
 // with a fake.
 type RoleRefresher interface {
-	Refresh(ctx context.Context) error
+	RefreshFromErrorRecovery(ctx context.Context) error
 }
 
 // WithRoleRefresh wraps a Client so that any manager-only API call which
@@ -130,7 +130,7 @@ func (c *roleAwareClient) check(_ context.Context, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), roleRefreshTimeout)
 	defer cancel()
 	//nolint:contextcheck // intentional: refresh must outlive the inbound request's deadline
-	if refreshErr := c.refresher.Refresh(ctx); refreshErr != nil {
+	if refreshErr := c.refresher.RefreshFromErrorRecovery(ctx); refreshErr != nil {
 		slog.Debug("lazy role refresh failed", "err", refreshErr)
 	}
 }
