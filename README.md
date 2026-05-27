@@ -91,9 +91,18 @@ All endpoints are served on both listeners; the host script talks to the Unix so
 
 The full HTTP contract (status codes, JSON shapes, identity rules) lives in [`docs/specs/2026-05-25-coordinator-design.md`](docs/specs/2026-05-25-coordinator-design.md).
 
+## Metrics
+
+The coordinator exposes OpenTelemetry metrics when configured. Two transports, both opt-in (default off):
+
+- **Prometheus pull**: set `METRICS_LISTEN_ADDR=:9100` and scrape `:9100/metrics`.
+- **OTLP push**: set `OTEL_EXPORTER_OTLP_ENDPOINT=host:port` (host:port, no scheme). The standard `OTEL_EXPORTER_OTLP_*` env vars are honoured.
+
+The stack file ships both knobs commented out. See [`docs/specs/2026-05-27-metrics-design.md`](docs/specs/2026-05-27-metrics-design.md) for the full metric catalogue.
+
 ## Status
 
-Pre-alpha. Specs under `docs/specs/`, design history in `docs/plans/`. Originally extracted from internal Matchory Puppet infrastructure for the `tier: docker_swarm` case in `updates::reboot`.
+Beta — observability available; the HTTP contract is not yet frozen. Specs under `docs/specs/`, design history in `docs/plans/`. Originally extracted from internal Matchory Puppet infrastructure for the `tier: docker_swarm` case in `updates::reboot`.
 
 ## Hacking on the project
 

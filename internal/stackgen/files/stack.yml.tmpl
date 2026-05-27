@@ -42,9 +42,21 @@ services:
       ROLE_RECHECK_SECONDS: "30"
       LOG_LEVEL: "info"
       UNIX_SOCKET_GID: "{{.GID}}"
+      # Metrics (Beta — defaults off; uncomment to enable):
+      # METRICS_LISTEN_ADDR: ":9100"                 # Prometheus pull endpoint
+      # OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4318" # OTLP HTTP push target (host:port, no scheme)
+      # METRICS_PUSH_INTERVAL_SECONDS: "15"
 {{- if .AllowUnencrypted }}
       ALLOW_UNENCRYPTED_OVERLAY: "true"
 {{- end }}
+    # Only needed if METRICS_LISTEN_ADDR is enabled above: publish the
+    # Prometheus listener host-side so a scraper can reach it per node
+    # (node_exporter convention — one target per host).
+    # ports:
+    #   - target: 9100
+    #     published: 9100
+    #     protocol: tcp
+    #     mode: host
     networks:
       - {{.ServiceName}}-net
     volumes:
