@@ -79,7 +79,7 @@ type LockMetrics struct {
 }
 ```
 
-A zero-value `Metrics` is safe. OTel instrument methods on a nil receiver are no-ops, so domain tests that don't care about metrics pass a zero-valued sub-struct without further setup.
+When metrics are not configured (both readers disabled), `metrics.New` falls back to `go.opentelemetry.io/otel/metric/noop` so the returned `Metrics` is fully populated with no-op instrument handles — domain code records as usual and the values go nowhere. Tests use `metrics.NewNoop()` for the same effect.
 
 Constructors in each instrumented package gain one extra parameter, the relevant sub-struct. `cmd/swarm-auto-drain/main.go` builds `*Metrics` first and threads the sub-views through to each collaborator. No global registry, no package-level singleton.
 
