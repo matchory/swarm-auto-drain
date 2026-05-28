@@ -165,7 +165,12 @@ func (s *ConfigStore) tryAcquire(
 	// 5. Stale steal. Re-inspect right before remove to catch the case where
 	// a peer already completed its own steal+create cycle in the gap; without
 	// this check we'd delete the peer's fresh lock and both nodes would
-	// believe they hold the cluster-wide mutex.
+	// believe they hold the cluster-wide mutex. Docker Configs have no atomic
+	// compare-and-delete, so this re-inspect SHRINKS but cannot fully close
+	// the remove→recreate window — a peer that confirms staleness at the same
+	// instant can still remove our fresh lock after our recreate. Step 6's
+	// post-recreate ownership check catches every interleaving where that
+	// peer's cycle lands before our recreate returns.
 	confirmed, confirmErr := s.loadCurrent(ctx)
 	if confirmErr != nil && !errors.Is(confirmErr, ErrNoLock) {
 		s.recordAcquireOutcome(ctx, "error")
@@ -192,6 +197,19 @@ func (s *ConfigStore) tryAcquire(
 	}
 	_, recreateErr := s.Docker.ConfigCreate(ctx, s.ConfigName, data, nil)
 	if recreateErr == nil {
+		// Confirm we actually own the lock we just recreated. A peer that
+		// confirmed the same stale doc can remove our fresh lock (its
+		// ConfigRemove is by-name and version-blind) and recreate its own in
+		// the non-atomic window; if its create lands before this inspect, the
+		// stored holder is the peer's, not ours, and claiming AcquiredViaSteal
+		// would give us a false belief of ownership while the peer also
+		// believes it holds the cluster mutex.
+		owner, ownErr := s.loadCurrent(ctx)
+		if ownErr == nil && owner != nil &&
+			(owner.Holder != holder || owner.AcquiredAt != doc.AcquiredAt) {
+			s.recordAcquireOutcome(ctx, "eexist")
+			return AcquireResult{Current: owner, Status: HeldByOther}, nil
+		}
 		s.markHeld(s.now())
 		s.recordAcquireOutcome(ctx, "stolen")
 		s.Metrics.Steals.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("reason", "ttl_expired")))

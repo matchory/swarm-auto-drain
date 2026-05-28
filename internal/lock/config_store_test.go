@@ -115,6 +115,66 @@ func TestAcquire_StaleSteal(t *testing.T) {
 	}
 }
 
+// clobberDocker simulates a concurrent peer that removes our freshly
+// recreated lock and writes its own in the non-atomic remove→recreate window:
+// once we recreate, every subsequent inspect reports the peer as holder.
+type clobberDocker struct {
+	stale  []byte // the expired holder we observe before stealing
+	peer   []byte // the holder a racing peer writes over our recreate
+	exists bool
+	stole  bool
+}
+
+func (c *clobberDocker) ConfigCreate(_ context.Context, _ string, _ []byte, _ map[string]string) (string, error) {
+	if c.exists {
+		return "", errors.New("rpc error: code = AlreadyExists desc = name conflicts")
+	}
+	c.exists = true
+	c.stole = true // our recreate succeeded — but a peer is about to clobber it.
+	return "id", nil
+}
+
+func (c *clobberDocker) ConfigInspect(_ context.Context, _ string) ([]byte, map[string]string, error) {
+	if !c.exists {
+		return nil, nil, errors.New("Error: no such config")
+	}
+	if c.stole {
+		return append([]byte(nil), c.peer...), nil, nil
+	}
+	return append([]byte(nil), c.stale...), nil, nil
+}
+
+func (c *clobberDocker) ConfigRemove(_ context.Context, _ string) error {
+	c.exists = false
+	return nil
+}
+
+func TestAcquire_StaleSteal_PeerClobbersRecreate(t *testing.T) {
+	stale, _ := json.Marshal(Lock{Holder: "node-a", AcquiredAt: 1000, TTLSeconds: 1800})
+	peer, _ := json.Marshal(Lock{Holder: "node-c", AcquiredAt: 4000, TTLSeconds: 1800})
+	c := &clobberDocker{stale: stale, peer: peer, exists: true}
+	s := &ConfigStore{
+		Docker:     c,
+		ConfigName: "lock",
+		Now:        func() time.Time { return time.Unix(1000+1800+1, 0) },
+		Metrics:    metrics.NewNoop().Lock,
+	}
+
+	r, err := s.Acquire(context.Background(), "node-b", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	// Post-recreate verification must detect the peer's clobber and refuse to
+	// claim ownership, rather than returning AcquiredViaSteal with a false
+	// belief while node-c also believes it holds the cluster mutex.
+	if r.Status != HeldByOther {
+		t.Errorf("Status = %v, want HeldByOther (peer clobbered our recreate)", r.Status)
+	}
+	if r.Current == nil || r.Current.Holder != "node-c" {
+		t.Errorf("Current = %+v, want holder node-c", r.Current)
+	}
+}
+
 func TestRelease_HolderOK(t *testing.T) {
 	f := &fakeDocker{}
 	s := newStore(f)
