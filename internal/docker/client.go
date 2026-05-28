@@ -225,18 +225,32 @@ func (d *dockerClient) NodeList(ctx context.Context, fs map[string][]string) ([]
 	return out, nil
 }
 
-// NodeUpdate flips a node's availability (active / pause / drain).
-func (d *dockerClient) NodeUpdate(ctx context.Context, nodeName, availability string) error {
+// nodeByHostname resolves a node by its exact hostname. The Docker `name`
+// filter matches substrings, so a hostname that is a prefix of another node's
+// (e.g. "web1" vs "web10") returns multiple nodes in unspecified order; we
+// must select the exact match rather than trusting nodes[0], otherwise we
+// could act on the wrong node.
+func (d *dockerClient) nodeByHostname(ctx context.Context, nodeName string) (swarm.Node, error) {
 	nodes, err := d.c.NodeList(ctx, types.NodeListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", nodeName)),
 	})
 	if err != nil {
-		return fmt.Errorf("node list %q: %w", nodeName, err)
+		return swarm.Node{}, fmt.Errorf("node list %q: %w", nodeName, err)
 	}
-	if len(nodes) == 0 {
-		return fmt.Errorf("%w: %q", ErrNodeNotFound, nodeName)
+	for i := range nodes {
+		if nodes[i].Description.Hostname == nodeName {
+			return nodes[i], nil
+		}
 	}
-	node := nodes[0]
+	return swarm.Node{}, fmt.Errorf("%w: %q", ErrNodeNotFound, nodeName)
+}
+
+// NodeUpdate flips a node's availability (active / pause / drain).
+func (d *dockerClient) NodeUpdate(ctx context.Context, nodeName, availability string) error {
+	node, err := d.nodeByHostname(ctx, nodeName)
+	if err != nil {
+		return err
+	}
 	node.Spec.Availability = swarm.NodeAvailability(availability)
 	if updateErr := d.c.NodeUpdate(ctx, node.ID, node.Version, node.Spec); updateErr != nil {
 		return fmt.Errorf("node update %q: %w", nodeName, updateErr)
@@ -246,8 +260,16 @@ func (d *dockerClient) NodeUpdate(ctx context.Context, nodeName, availability st
 
 // NodeTaskCount returns the number of running tasks scheduled on the named node.
 func (d *dockerClient) NodeTaskCount(ctx context.Context, nodeName string) (int, error) {
+	// Resolve to the exact node ID first: the task `node` filter, like the
+	// node `name` filter, matches by name OR ID with substring semantics, so
+	// filtering by hostname could count a prefix-collision peer's tasks and
+	// the drain poll would never observe count==0. A full node ID is exact.
+	node, err := d.nodeByHostname(ctx, nodeName)
+	if err != nil {
+		return 0, err
+	}
 	args := filters.NewArgs(
-		filters.Arg("node", nodeName),
+		filters.Arg("node", node.ID),
 		filters.Arg("desired-state", "running"),
 	)
 	tasks, err := d.c.TaskList(ctx, types.TaskListOptions{Filters: args})
@@ -390,7 +412,11 @@ func (d *dockerClient) TasksByServiceWithIPs(ctx context.Context, serviceName st
 	for i := range tasks {
 		task := &tasks[i]
 		host, ok := nodeHostname[task.NodeID]
-		if !ok {
+		// Skip empty hostnames: a node mid-join may have a running task before
+		// its Description.Hostname propagates. Mapping an IP to "" would let
+		// the resolver return an empty identity that downstream treats as a
+		// real node — writing a lock with an empty, unreleasable holder.
+		if !ok || host == "" {
 			continue
 		}
 		for j := range task.NetworksAttachments {
