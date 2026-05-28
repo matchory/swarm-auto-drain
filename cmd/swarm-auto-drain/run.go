@@ -185,14 +185,24 @@ func run(cfg *config.Config) error {
 	//     → AuditLog (sees resolved identity, observes handler status)
 	//       → Router
 	//
+	// The handler trees are assembled ONCE here, not per request: the
+	// router, middleware, and worker mux are all role-invariant and
+	// stateless, so the per-request closures only need to read role.Role()
+	// and pick which prebuilt tree to serve. Rebuilding them per request
+	// would re-allocate a ServeMux and re-register every route on the hot
+	// path of every inbound call.
+	audited := api.AuditLog(handlers.Router())
+	workerTree := buildWorkerHandler(handlers.Router(), fwd)
+
 	// Overlay TCP listener: peer replicas only. Manager mode wraps the
 	// router in the IP-derived identity middleware; worker mode forwards
 	// outbound and never touches identity.
+	overlayManager := mw.Wrap(audited)
 	overlayHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if role.Role() == dockerpkg.RoleManager {
-			mw.Wrap(api.AuditLog(handlers.Router())).ServeHTTP(w, r)
+			overlayManager.ServeHTTP(w, r)
 		} else {
-			buildWorkerHandler(handlers.Router(), fwd).ServeHTTP(w, r)
+			workerTree.ServeHTTP(w, r)
 		}
 	})
 	// Host Unix-socket listener: filesystem permissions are the access
@@ -203,14 +213,14 @@ func run(cfg *config.Config) error {
 	// a worker (forwarded to a manager) but not from a manager directly.
 	// In worker mode HostTrust still injects identity, but the forwarder
 	// overwrites X-Origin-Node from cfg.NodeHostname before relaying.
+	hostManager := identity.HostTrust(cfg.NodeHostname, audited)
+	hostWorker := identity.HostTrust(cfg.NodeHostname, workerTree)
 	hostHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var inner http.Handler
 		if role.Role() == dockerpkg.RoleManager {
-			inner = api.AuditLog(handlers.Router())
+			hostManager.ServeHTTP(w, r)
 		} else {
-			inner = buildWorkerHandler(handlers.Router(), fwd)
+			hostWorker.ServeHTTP(w, r)
 		}
-		identity.HostTrust(cfg.NodeHostname, inner).ServeHTTP(w, r)
 	})
 
 	listeners, err := bindListeners(ctx, cfg, overlayHandler, hostHandler, metricsHandler)
