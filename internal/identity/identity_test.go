@@ -198,6 +198,28 @@ func TestMiddleware_OverlayUnknownIPIs503(t *testing.T) {
 	}
 }
 
+func TestMiddleware_OverlayEmptyIdentityIs503(t *testing.T) {
+	// A resolver that maps the IP to an empty hostname (e.g. a node whose
+	// Description.Hostname hasn't propagated) must NOT be accepted as a valid
+	// identity — an empty holder would write an unreleasable lock. Reject as
+	// transient so the forwarder retries once the hostname propagates.
+	mw := Middleware{
+		NodeHostname: "manager-1",
+		Resolver:     &fakeResolver{byIP: map[string]string{"10.0.0.42": ""}},
+		Metrics:      noopIdentity,
+	}
+	h := mw.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler must not run with an empty resolved identity")
+	}))
+	r := httptest.NewRequest(http.MethodPost, "/drain", http.NoBody)
+	r.RemoteAddr = "10.0.0.42:34567"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (empty identity is not acceptable)", w.Code)
+	}
+}
+
 func TestMiddleware_OverlayWithoutResolverIs400(t *testing.T) {
 	// Manager misconfigured: no resolver. NOT transient — return 400.
 	mw := Middleware{NodeHostname: "manager-1", Metrics: noopIdentity}

@@ -114,6 +114,12 @@ func (m Middleware) resolve(r *http.Request) (id, source string, status int, err
 	if rerr != nil {
 		return "", source, http.StatusServiceUnavailable, rerr
 	}
+	if derived == "" {
+		// An empty identity must never reach the lock/drain sinks (it would
+		// write an unreleasable empty-holder lock). Treat as transient so the
+		// forwarder retries once the node's hostname propagates.
+		return "", source, http.StatusServiceUnavailable, errEmptyIdentity
+	}
 
 	claimed := r.Header.Get("X-Origin-Node")
 	if claimed == "" || claimed == derived {
@@ -156,8 +162,9 @@ type stringError string
 func (e stringError) Error() string { return string(e) }
 
 const (
-	errBadRemote  = stringError("invalid remote address")
-	errNoResolver = stringError("non-loopback caller but no resolver configured")
+	errBadRemote     = stringError("invalid remote address")
+	errNoResolver    = stringError("non-loopback caller but no resolver configured")
+	errEmptyIdentity = stringError("resolved identity is empty")
 )
 
 type mismatchError struct{ claimed, derived string }
