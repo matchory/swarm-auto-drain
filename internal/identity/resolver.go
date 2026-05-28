@@ -44,10 +44,11 @@ type SwarmResolver struct {
 	cachedAt    time.Time
 	cache       map[string]string
 	ServiceName string
-	mu          sync.Mutex    // Protects cache, cachedAt, gen, invalGen.
+	mu          sync.Mutex    // Protects cache, cachedAt, gen, invalGen, missGen.
 	refreshMu   sync.Mutex    // Serializes refresh RPCs (single-flight).
 	gen         uint64        // Incremented on each successful refresh.
 	invalGen    uint64        // See note on the SwarmResolver type doc.
+	missGen     uint64        // gen of the last miss-refresh that still didn't find the IP.
 	TTL         time.Duration // Default 5s.
 }
 
@@ -72,12 +73,21 @@ func (r *SwarmResolver) Invalidate() {
 // NodeForOverlayIP returns the swarm node hostname for the given overlay IP,
 // consulting the cache then refreshing on miss.
 func (r *SwarmResolver) NodeForOverlayIP(ctx context.Context, ip string) (string, error) {
-	cache, snapGen, fresh := r.snapshotCache()
+	cache, snapGen, missDone, fresh := r.snapshotCache()
 	if fresh {
 		if h, ok := cache[ip]; ok {
 			return h, nil
 		}
-		// Cache hit but IP missing: force a refresh — peer may have just joined.
+		// Fresh cache but IP missing. Refresh once to pick up a peer that
+		// joined since the last refresh — but only if we haven't ALREADY
+		// miss-refreshed against this cache generation. Without that guard a
+		// burst of unknown-IP requests (a spoofed/recycled source, or a flood
+		// from one bad peer) would each force a full TaskList+NodeList,
+		// defeating the TTL cache. A genuinely-new peer is still picked up at
+		// the next TTL refresh, within the contract documented on the type.
+		if missDone {
+			return "", ErrUnknownIP
+		}
 	}
 	refreshed, err := r.refresh(ctx, snapGen)
 	if err != nil {
@@ -86,7 +96,17 @@ func (r *SwarmResolver) NodeForOverlayIP(ctx context.Context, ip string) (string
 	if h, ok := refreshed[ip]; ok {
 		return h, nil
 	}
+	r.recordMiss()
 	return "", ErrUnknownIP
+}
+
+// recordMiss marks the current cache generation as having been refreshed in
+// response to a cache miss that still didn't find the IP, so subsequent misses
+// against the same generation skip the redundant RPC.
+func (r *SwarmResolver) recordMiss() {
+	r.mu.Lock()
+	r.missGen = r.gen
+	r.mu.Unlock()
 }
 
 func (r *SwarmResolver) ttl() time.Duration {
@@ -96,14 +116,17 @@ func (r *SwarmResolver) ttl() time.Duration {
 	return r.TTL
 }
 
-// snapshotCache returns (cache, generation, fresh). The generation lets
-// refresh detect that a concurrent caller has already advanced the cache
-// past the observed state, avoiding a redundant RPC.
-func (r *SwarmResolver) snapshotCache() (map[string]string, uint64, bool) {
+// snapshotCache returns (cache, generation, missDone, fresh). The generation
+// lets refresh detect that a concurrent caller has already advanced the cache
+// past the observed state, avoiding a redundant RPC. missDone reports whether
+// the current generation has already been miss-refreshed, so a repeat miss can
+// skip the RPC.
+func (r *SwarmResolver) snapshotCache() (map[string]string, uint64, bool, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	fresh := r.cache != nil && time.Since(r.cachedAt) < r.ttl()
-	return r.cache, r.gen, fresh
+	missDone := r.gen != 0 && r.missGen == r.gen
+	return r.cache, r.gen, missDone, fresh
 }
 
 // refresh fetches a fresh task map. Concurrent callers single-flight on

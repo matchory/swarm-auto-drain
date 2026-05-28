@@ -64,6 +64,25 @@ func TestSwarmResolver_UnknownIPTriggersRefreshOnce(t *testing.T) {
 	}
 }
 
+func TestSwarmResolver_RepeatedUnknownIPRefreshesOnce(t *testing.T) {
+	// A flood of lookups for the SAME unknown IP must trigger at most one
+	// refresh per cache generation — otherwise each miss would fire a full
+	// TaskList+NodeList, defeating the TTL cache under a bad/spoofed peer.
+	fl := &fakeLookup{out: map[string]string{"10.0.0.42": "worker-3"}}
+	r := &SwarmResolver{Docker: fl, ServiceName: "svc", TTL: time.Hour}
+
+	_, _ = r.NodeForOverlayIP(context.Background(), "10.0.0.42") // Call 1: populate (1 RPC).
+	for i := range 5 {
+		_, err := r.NodeForOverlayIP(context.Background(), "10.0.0.99")
+		if !errors.Is(err, ErrUnknownIP) {
+			t.Fatalf("miss %d: err = %v, want ErrUnknownIP", i, err)
+		}
+	}
+	if fl.calls != 2 {
+		t.Errorf("docker calls = %d, want 2 (initial + one miss-refresh, not one per miss)", fl.calls)
+	}
+}
+
 func TestSwarmResolver_NewIPVisibleAfterRefresh(t *testing.T) {
 	fl := &fakeLookup{out: map[string]string{"10.0.0.42": "worker-3"}}
 	r := &SwarmResolver{Docker: fl, ServiceName: "svc", TTL: time.Hour}
