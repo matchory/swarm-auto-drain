@@ -202,6 +202,28 @@ func TestForwarder_RecordsAttemptConnectError(t *testing.T) {
 	}
 }
 
+func TestManagerFinder_ProbeDecodesRoleNotSubstring(t *testing.T) {
+	// A worker whose /role names a leader literally called "manager" must NOT
+	// be misidentified as a manager: probe decodes the role field rather than
+	// substring-matching the body.
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"role":"worker","leader":"manager"}`))
+	}))
+	defer worker.Close()
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"role":"manager","leader":"manager"}`))
+	}))
+	defer manager.Close()
+
+	mf := &ManagerFinder{Client: &http.Client{Timeout: time.Second}}
+	if mf.probe(worker.URL) {
+		t.Error("probe accepted a worker whose leader is named \"manager\"")
+	}
+	if !mf.probe(manager.URL) {
+		t.Error("probe rejected a genuine manager")
+	}
+}
+
 func TestManagerFinder_RecordsInvalidation(t *testing.T) {
 	reader, m := metrics.NewManualHarness(t)
 	mf := &ManagerFinder{Metrics: m.Forward}

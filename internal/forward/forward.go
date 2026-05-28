@@ -5,6 +5,7 @@ package forward
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -234,9 +235,23 @@ func (m *ManagerFinder) probe(base string) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false
 	}
-	return resp.StatusCode == http.StatusOK && bytes.Contains(body, []byte(`"manager"`))
+	// Decode the documented /role contract rather than substring-matching the
+	// raw body: a substring check would false-positive on any other field
+	// whose value contains "manager" (e.g. a leader hostname literally named
+	// "manager"), causing a worker to forward control-plane requests to a peer
+	// that isn't actually a manager.
+	var payload struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	return payload.Role == "manager"
 }
