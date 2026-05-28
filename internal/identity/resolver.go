@@ -121,11 +121,11 @@ func (r *SwarmResolver) ttl() time.Duration {
 // past the observed state, avoiding a redundant RPC. missDone reports whether
 // the current generation has already been miss-refreshed, so a repeat miss can
 // skip the RPC.
-func (r *SwarmResolver) snapshotCache() (map[string]string, uint64, bool, bool) {
+func (r *SwarmResolver) snapshotCache() (cache map[string]string, gen uint64, missDone, fresh bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	fresh := r.cache != nil && time.Since(r.cachedAt) < r.ttl()
-	missDone := r.gen != 0 && r.missGen == r.gen
+	fresh = r.cache != nil && time.Since(r.cachedAt) < r.ttl()
+	missDone = r.gen != 0 && r.missGen == r.gen
 	return r.cache, r.gen, missDone, fresh
 }
 

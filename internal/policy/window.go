@@ -6,6 +6,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -24,7 +25,8 @@ var ErrWindowParse = errors.New("invalid window spec")
 
 // errWindowCrossesMidnight is referenced by tests via its exact message; we
 // keep the message verbatim because operators paste it into bug reports.
-const crossMidnightMsg = "window may not cross midnight; use 'Sun 22:00-23:59,Mon 00:00-06:00' or shift to a same-day range"
+const crossMidnightMsg = "window may not cross midnight; " +
+	"use 'Sun 22:00-23:59,Mon 00:00-06:00' or shift to a same-day range"
 
 var shortWeekdays = map[string]time.Weekday{
 	"mon": time.Monday,
@@ -121,16 +123,16 @@ func parseDays(spec string) ([]time.Weekday, error) {
 	return out, nil
 }
 
-func parseTimeRange(spec string) (time.Duration, time.Duration, error) {
+func parseTimeRange(spec string) (start, end time.Duration, err error) {
 	ends := strings.SplitN(spec, "-", 2)
 	if len(ends) != 2 {
 		return 0, 0, fmt.Errorf("%w: time range must be HH:MM-HH:MM: %q", ErrWindowParse, spec)
 	}
-	start, err := parseHHMM(ends[0])
+	start, err = parseHHMM(ends[0])
 	if err != nil {
 		return 0, 0, err
 	}
-	end, err := parseHHMM(ends[1])
+	end, err = parseHHMM(ends[1])
 	if err != nil {
 		return 0, 0, err
 	}
@@ -146,7 +148,7 @@ func parseHHMM(s string) (time.Duration, error) {
 	}
 	var h, m int
 	if _, err := fmt.Sscanf(s, "%2d:%2d", &h, &m); err != nil {
-		return 0, fmt.Errorf("%w: time %q: %v", ErrWindowParse, s, err)
+		return 0, fmt.Errorf("%w: time %q: %w", ErrWindowParse, s, err)
 	}
 	if h < 0 || h > 23 || m < 0 || m > 59 {
 		return 0, fmt.Errorf("%w: time %q out of range", ErrWindowParse, s)
@@ -162,18 +164,8 @@ func InWindow(now time.Time, w Window) bool {
 	}
 	now = now.UTC()
 
-	if len(w.Days) > 0 {
-		today := now.Weekday()
-		match := false
-		for _, d := range w.Days {
-			if d == today {
-				match = true
-				break
-			}
-		}
-		if !match {
-			return false
-		}
+	if len(w.Days) > 0 && !slices.Contains(w.Days, now.Weekday()) {
+		return false
 	}
 
 	offset := time.Duration(now.Hour())*time.Hour +

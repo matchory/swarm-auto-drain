@@ -164,7 +164,7 @@ func runReboot(
 	cancelDrain()
 	if err != nil {
 		slog.Error("drain", "err", err, "reason", reasonDrainFailed)
-		releaseBestEffort(client, lockTimeout)
+		releaseBestEffort(ctx, client, lockTimeout)
 		return 1
 	}
 	switch status {
@@ -173,16 +173,16 @@ func runReboot(
 	case http.StatusRequestTimeout:
 		slog.Error("drain timed out",
 			"body", string(body), "reason", reasonDrainTimeout)
-		releaseBestEffort(client, lockTimeout)
+		releaseBestEffort(ctx, client, lockTimeout)
 		return 1
 	case http.StatusServiceUnavailable:
 		slog.Info("skip", "reason", reasonQuorumGuard, "body", string(body))
-		releaseBestEffort(client, lockTimeout)
+		releaseBestEffort(ctx, client, lockTimeout)
 		return 0
 	default:
 		slog.Error("drain status",
 			"status", status, "body", string(body), "reason", reasonDrainFailed)
-		releaseBestEffort(client, lockTimeout)
+		releaseBestEffort(ctx, client, lockTimeout)
 		return 1
 	}
 
@@ -204,10 +204,10 @@ func runReboot(
 // releaseBestEffort tries to release the cluster lock. Failures are
 // logged but never propagated — the caller is already on an error path
 // and the lock will eventually be reclaimed via the stale-TTL mechanism.
-func releaseBestEffort(client *hostclient.Client, timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func releaseBestEffort(ctx context.Context, client *hostclient.Client, timeout time.Duration) {
+	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	status, err := client.ReleaseLock(ctx)
+	status, err := client.ReleaseLock(rctx)
 	if err != nil {
 		slog.Warn("best-effort lock release",
 			"err", err.Error(),
@@ -262,7 +262,7 @@ func envSecondsOr(key string, fallback int) time.Duration {
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
 		slog.Warn("invalid env seconds; using default",
-			"key", key, "value", v, "default", fallback)
+			"key", key, "value", strconv.Quote(v), "default", fallback)
 		return time.Duration(fallback) * time.Second
 	}
 	return time.Duration(n) * time.Second

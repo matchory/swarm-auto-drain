@@ -31,5 +31,7 @@ docker compose -f tests/integration/docker-compose.yml down -v
 
 ## CI
 
-`.github/workflows/ci.yml` runs this same script in a GitHub-hosted
-runner that supports nested Docker.
+Not currently invoked from `.github/workflows/ci.yml` — the fixture is
+run locally before changes that touch Docker SDK assumptions. CI runs
+`go vet` and the race-enabled unit suite; `release.yml` builds the
+multi-arch image on tag.

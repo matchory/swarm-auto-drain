@@ -120,7 +120,7 @@ func TestInstall_WritesUnits(t *testing.T) {
 	}
 	want, _ := embeddedFiles.ReadFile("files/swarm-auto-drain.env")
 	if !bytes.Equal(got, want) {
-		t.Errorf("env content mismatch")
+		t.Error("env content mismatch")
 	}
 }
 
@@ -135,7 +135,7 @@ func TestInstall_Idempotent(t *testing.T) {
 	}
 	snap2 := snapshotTree(t, opts.Root)
 	if !equalSnapshots(snap1, snap2) {
-		t.Errorf("second install changed filesystem state")
+		t.Error("second install changed filesystem state")
 	}
 }
 
@@ -174,7 +174,7 @@ func TestInstall_ForceOverwritesEnvFile(t *testing.T) {
 	got, _ := os.ReadFile(envPath)
 	want, _ := embeddedFiles.ReadFile("files/swarm-auto-drain.env")
 	if !bytes.Equal(got, want) {
-		t.Errorf("env file not overwritten with --force")
+		t.Error("env file not overwritten with --force")
 	}
 }
 
@@ -208,7 +208,7 @@ func TestInstall_RunnerErrorPropagates(t *testing.T) {
 	opts.Runner = fr.run
 	opts.LookupGroup = lookupMissing()
 	if err := Install(opts); err == nil {
-		t.Fatalf("want error from failing groupadd, got nil")
+		t.Fatal("want error from failing groupadd, got nil")
 	}
 }
 
@@ -269,7 +269,7 @@ func TestInstall_Uninstall_RoundTrip(t *testing.T) {
 	}
 	snap2 := snapshotTree(t, opts.Root)
 	if !equalSnapshots(snap1, snap2) {
-		t.Errorf("install→uninstall→install did not reproduce original state")
+		t.Error("install→uninstall→install did not reproduce original state")
 	}
 }
 

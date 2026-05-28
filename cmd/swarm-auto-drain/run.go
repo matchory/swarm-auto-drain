@@ -132,6 +132,40 @@ func run(cfg *config.Config) error {
 	// available on any node, so it never trips the refresh check).
 	dcli = dockerpkg.WithRoleRefresh(dcli, role)
 
+	handlers, mw, fwd := buildCollaborators(cfg, dcli, role, mtr, serviceName)
+	overlayHandler, hostHandler := buildRoleSwitchedHandlers(cfg, role, &handlers, mw, fwd)
+
+	listeners, err := bindListeners(ctx, cfg, overlayHandler, hostHandler, metricsHandler)
+	if err != nil {
+		return err
+	}
+
+	srv := &api.Server{
+		Listeners:     listeners,
+		ShutdownGrace: cfg.DrainTimeout + shutdownGraceExtra,
+	}
+	slog.Info("listening",
+		"tcp", cfg.ListenAddr,
+		"unix", cfg.UnixSocketPath,
+		"metrics", cfg.MetricsListenAddr,
+		"initial_role", role.Role().String(),
+	)
+	if runErr := srv.Run(ctx); runErr != nil {
+		return fmt.Errorf("server: %w", runErr)
+	}
+	return nil
+}
+
+// buildCollaborators constructs the lock store, drainer, HTTP handlers,
+// identity middleware, and forwarder. dcli must already be wrapped with the
+// role-refresh decorator before being passed in.
+func buildCollaborators(
+	cfg *config.Config,
+	dcli dockerpkg.Client,
+	role *dockerpkg.RoleDetector,
+	mtr metrics.Metrics,
+	serviceName string,
+) (api.Handlers, identity.Middleware, *forward.Forwarder) {
 	// Now field intentionally left as the package's default (time.Now);
 	// tests inject a fake via the package directly.
 	//nolint:exhaustruct // Now defaults to time.Now
@@ -174,23 +208,30 @@ func run(cfg *config.Config) error {
 		Retries:          forwardRetries,
 		Metrics:          mtr.Forward,
 	}
+	return handlers, mw, fwd
+}
 
-	// Two handler trees, one per listener — each carries its own trust
-	// model so we never accidentally apply the wrong one to the wrong
-	// traffic. Re-checking role per-request means promote/demote takes
-	// effect on the next inbound call without a restart.
-	//
-	// Middleware order (outer to inner) in each manager-mode path:
-	//   identity (HostTrust or Middleware)
-	//     → AuditLog (sees resolved identity, observes handler status)
-	//       → Router
-	//
-	// The handler trees are assembled ONCE here, not per request: the
-	// router, middleware, and worker mux are all role-invariant and
-	// stateless, so the per-request closures only need to read role.Role()
-	// and pick which prebuilt tree to serve. Rebuilding them per request
-	// would re-allocate a ServeMux and re-register every route on the hot
-	// path of every inbound call.
+// buildRoleSwitchedHandlers builds the two listener-specific HTTP handlers
+// (overlay TCP and host Unix-socket), each of which picks between a manager
+// or worker handler tree based on the live role check.
+//
+// Middleware order (outer to inner) in each manager-mode path:
+//
+//	identity (HostTrust or Middleware)
+//	  → AuditLog (sees resolved identity, observes handler status)
+//	    → Router
+//
+// The handler trees are assembled ONCE here, not per request: the router,
+// middleware, and worker mux are all role-invariant and stateless, so the
+// per-request closures only need to read role.Role() and pick which
+// prebuilt tree to serve.
+func buildRoleSwitchedHandlers(
+	cfg *config.Config,
+	role *dockerpkg.RoleDetector,
+	handlers *api.Handlers,
+	mw identity.Middleware,
+	fwd *forward.Forwarder,
+) (overlayHandler, hostHandler http.HandlerFunc) {
 	audited := api.AuditLog(handlers.Router())
 	workerTree := buildWorkerHandler(handlers.Router(), fwd)
 
@@ -198,13 +239,13 @@ func run(cfg *config.Config) error {
 	// router in the IP-derived identity middleware; worker mode forwards
 	// outbound and never touches identity.
 	overlayManager := mw.Wrap(audited)
-	overlayHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	overlayHandler = func(w http.ResponseWriter, r *http.Request) {
 		if role.Role() == dockerpkg.RoleManager {
 			overlayManager.ServeHTTP(w, r)
 		} else {
 			workerTree.ServeHTTP(w, r)
 		}
-	})
+	}
 	// Host Unix-socket listener: filesystem permissions are the access
 	// boundary, with the kernel-reported UID == 0 check via SO_PEERCRED
 	// layered on top. HostTrust enforces that on BOTH manager and worker
@@ -215,33 +256,14 @@ func run(cfg *config.Config) error {
 	// overwrites X-Origin-Node from cfg.NodeHostname before relaying.
 	hostManager := identity.HostTrust(cfg.NodeHostname, audited)
 	hostWorker := identity.HostTrust(cfg.NodeHostname, workerTree)
-	hostHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hostHandler = func(w http.ResponseWriter, r *http.Request) {
 		if role.Role() == dockerpkg.RoleManager {
 			hostManager.ServeHTTP(w, r)
 		} else {
 			hostWorker.ServeHTTP(w, r)
 		}
-	})
-
-	listeners, err := bindListeners(ctx, cfg, overlayHandler, hostHandler, metricsHandler)
-	if err != nil {
-		return err
 	}
-
-	srv := &api.Server{
-		Listeners:     listeners,
-		ShutdownGrace: cfg.DrainTimeout + shutdownGraceExtra,
-	}
-	slog.Info("listening",
-		"tcp", cfg.ListenAddr,
-		"unix", cfg.UnixSocketPath,
-		"metrics", cfg.MetricsListenAddr,
-		"initial_role", role.Role().String(),
-	)
-	if runErr := srv.Run(ctx); runErr != nil {
-		return fmt.Errorf("server: %w", runErr)
-	}
-	return nil
+	return overlayHandler, hostHandler
 }
 
 // metricsConfig assembles the metrics provider config from the daemon

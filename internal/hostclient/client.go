@@ -95,7 +95,8 @@ func (c *Client) httpClient() *http.Client {
 func (c *Client) do(ctx context.Context, method, path string) (int, []byte, error) {
 	// The hostname in the URL is meaningless — DialContext pins us to the
 	// socket — but net/http requires a syntactically valid URL.
-	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, nil)
+	//revive:disable-next-line:unsecure-url-scheme // unix socket — scheme is a syntactic placeholder
+	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, http.NoBody)
 	if err != nil {
 		return 0, nil, fmt.Errorf("build %s %s: %w", method, path, err)
 	}

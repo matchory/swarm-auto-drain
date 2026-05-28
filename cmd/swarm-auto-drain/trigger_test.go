@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -326,7 +327,7 @@ func TestTrigger_RebootFailureKeepsLock(t *testing.T) {
 	}
 }
 
-var errBoom = fmt.Errorf("boom")
+var errBoom = errors.New("boom")
 
 func TestTrigger_VersionSkewWarning(t *testing.T) {
 	f := &fakeDaemon{

@@ -20,7 +20,7 @@ func TestNew_NoReadersConfigured_ReturnsNoop(t *testing.T) {
 		t.Errorf("handler should be nil when no Prom listener configured, got %T", handler)
 	}
 	if shutdown != nil {
-		t.Errorf("shutdown should be nil when no readers configured")
+		t.Error("shutdown should be nil when no readers configured")
 	}
 	if m.Lock.Acquire == nil {
 		t.Error("Metrics still must be populated (noop-backed)")
@@ -50,12 +50,13 @@ func TestNew_PromListener_ReturnsHandler(t *testing.T) {
 
 	// Sanity: handler serves Prometheus text format.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") && !strings.HasPrefix(ct, "application/openmetrics-text") {
+	ct := w.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/plain") && !strings.HasPrefix(ct, "application/openmetrics-text") {
 		t.Errorf("unexpected content-type %q", ct)
 	}
 
@@ -121,7 +122,7 @@ func TestNew_RuntimeMetricsRegisteredOnRealProvider(t *testing.T) {
 	defer func() { _ = shutdown(context.Background()) }()
 
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	body := w.Body.String()
 	// Contrib's goroutine metric has been renamed across versions:
 	// process_runtime_go_goroutines (oldest), runtime_go_goroutines, and
@@ -129,10 +130,7 @@ func TestNew_RuntimeMetricsRegisteredOnRealProvider(t *testing.T) {
 	if !strings.Contains(body, "process_runtime_go_goroutines") &&
 		!strings.Contains(body, "runtime_go_goroutines") &&
 		!strings.Contains(body, "go_goroutine_count") {
-		end := len(body)
-		if end > 500 {
-			end = 500
-		}
+		end := min(len(body), 500)
 		t.Errorf("expected runtime metrics in /metrics output; got:\n%s", body[:end])
 	}
 }

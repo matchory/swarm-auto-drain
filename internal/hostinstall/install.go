@@ -65,23 +65,9 @@ const (
 
 // Install executes the per-host bootstrap. See package doc.
 func Install(opts Options) error {
-	if opts.Root == "" {
-		opts.Root = "/"
-	}
-	if opts.Runner == nil {
-		opts.Runner = defaultRunner
-	}
-	if opts.LookupGroup == nil {
-		opts.LookupGroup = user.LookupGroup
-	}
-	if opts.Out == nil {
-		opts.Out = os.Stdout
-	}
-	if opts.Root == "/" && os.Geteuid() != 0 {
-		return errors.New("install: must run as root (or pass --root <prefix>)")
-	}
-	if opts.GID <= 0 {
-		return errors.New("install: --gid must be a positive integer")
+	opts = applyInstallDefaults(opts)
+	if err := validateInstall(opts); err != nil {
+		return err
 	}
 
 	if err := ensureGroup(opts); err != nil {
@@ -117,30 +103,13 @@ func Install(opts Options) error {
 // failures are logged and continued past — a partial state must still
 // converge to "nothing systemd-visible".
 func Uninstall(opts Options) error {
-	if opts.Root == "" {
-		opts.Root = "/"
-	}
-	if opts.Runner == nil {
-		opts.Runner = defaultRunner
-	}
-	if opts.Out == nil {
-		opts.Out = os.Stdout
-	}
+	opts = applyUninstallDefaults(opts)
 	if opts.Root == "/" && os.Geteuid() != 0 {
 		return errors.New("uninstall: must run as root (or pass --root <prefix>)")
 	}
 
 	if opts.Root == "/" {
-		for _, unit := range []string{UnitTriggerTimer, UnitResumeService} {
-			if out, err := opts.Runner("systemctl", "stop", unit); err != nil {
-				slog.Info("systemctl stop (best-effort)",
-					"unit", unit, "err", err, "out", out)
-			}
-			if out, err := opts.Runner("systemctl", "disable", unit); err != nil {
-				slog.Info("systemctl disable (best-effort)",
-					"unit", unit, "err", err, "out", out)
-			}
-		}
+		stopAndDisableUnits(opts)
 	}
 
 	for _, name := range []string{UnitTriggerService, UnitTriggerTimer, UnitResumeService} {
@@ -159,6 +128,58 @@ func Uninstall(opts Options) error {
 
 	printUninstallSummary(opts)
 	return nil
+}
+
+func applyInstallDefaults(opts Options) Options {
+	if opts.Root == "" {
+		opts.Root = "/"
+	}
+	if opts.Runner == nil {
+		opts.Runner = defaultRunner
+	}
+	if opts.LookupGroup == nil {
+		opts.LookupGroup = user.LookupGroup
+	}
+	if opts.Out == nil {
+		opts.Out = os.Stdout
+	}
+	return opts
+}
+
+func validateInstall(opts Options) error {
+	if opts.Root == "/" && os.Geteuid() != 0 {
+		return errors.New("install: must run as root (or pass --root <prefix>)")
+	}
+	if opts.GID <= 0 {
+		return errors.New("install: --gid must be a positive integer")
+	}
+	return nil
+}
+
+func applyUninstallDefaults(opts Options) Options {
+	if opts.Root == "" {
+		opts.Root = "/"
+	}
+	if opts.Runner == nil {
+		opts.Runner = defaultRunner
+	}
+	if opts.Out == nil {
+		opts.Out = os.Stdout
+	}
+	return opts
+}
+
+func stopAndDisableUnits(opts Options) {
+	for _, unit := range []string{UnitTriggerTimer, UnitResumeService} {
+		if out, err := opts.Runner("systemctl", "stop", unit); err != nil {
+			slog.Info("systemctl stop (best-effort)",
+				"unit", unit, "err", err, "out", out)
+		}
+		if out, err := opts.Runner("systemctl", "disable", unit); err != nil {
+			slog.Info("systemctl disable (best-effort)",
+				"unit", unit, "err", err, "out", out)
+		}
+	}
 }
 
 func ensureGroup(opts Options) error {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/system"
+
 	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 

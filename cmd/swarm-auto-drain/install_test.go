@@ -20,7 +20,7 @@ func TestInstallCmd_RequiresGID(t *testing.T) {
 		t.Errorf("exit code = %d, want %d", code, exitConfigErr)
 	}
 	if called {
-		t.Errorf("installFn called despite missing --gid")
+		t.Error("installFn called despite missing --gid")
 	}
 }
 

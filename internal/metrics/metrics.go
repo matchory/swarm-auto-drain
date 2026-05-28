@@ -45,7 +45,7 @@ type RoleMetrics struct {
 	Transitions metric.Int64Counter // attrs: from, to
 }
 
-// ForwardMetrics covers worker→manager proxy behaviour.
+// ForwardMetrics covers worker→manager proxy behavior.
 type ForwardMetrics struct {
 	Attempts           metric.Int64Counter     // attrs: outcome
 	Duration           metric.Float64Histogram // unit: seconds
@@ -65,6 +65,8 @@ type HTTPMetrics struct {
 
 // build wires a Metrics struct from a meter provider. Used by both the
 // production constructor (New) and the test/noop constructors.
+//
+//nolint:gocyclo,cyclop,revive // one branch per instrument; flat is easier to audit than indirection.
 func build(meter metric.Meter) (Metrics, error) {
 	var m Metrics
 	var err error

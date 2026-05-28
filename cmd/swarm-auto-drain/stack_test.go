@@ -19,7 +19,7 @@ func TestStackCmd_DefaultsCrossValidate(t *testing.T) {
 	}
 	out := buf.String()
 	if !strings.Contains(out, `encrypted: "true"`) {
-		t.Errorf("default render missing encrypted overlay")
+		t.Error("default render missing encrypted overlay")
 	}
 	if err := docker.ValidateServiceName(stackgen.DefaultServiceName); err != nil {
 		t.Errorf("default service name fails runtime validation: %v", err)

@@ -10,12 +10,13 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
+
 	"github.com/matchory/swarm-auto-drain/internal/drain"
 	"github.com/matchory/swarm-auto-drain/internal/identity"
 	"github.com/matchory/swarm-auto-drain/internal/lock"
 	"github.com/matchory/swarm-auto-drain/internal/metrics"
-	"go.opentelemetry.io/otel/attribute"
-	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // Handlers wires the HTTP handlers onto their collaborators.

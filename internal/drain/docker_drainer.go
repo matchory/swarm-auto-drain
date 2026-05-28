@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/matchory/swarm-auto-drain/internal/metrics"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 // reachableState is the value Docker reports for a manager that's in raft

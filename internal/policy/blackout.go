@@ -25,7 +25,7 @@ const dateLayout = "2006-01-02"
 // is not an error: callers treat the absence as "no blackouts configured" so
 // operators can ship configuration before deciding to use it.
 func ParseBlackoutFile(path string) ([]Range, error) {
-	f, err := os.Open(path) //nolint:gosec // path is operator-supplied, intentional
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -45,7 +45,7 @@ func ParseBlackoutFile(path string) ([]Range, error) {
 		}
 		r, err := parseBlackoutEntry(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%w: line %d: %q: %v", ErrBlackoutParse, line, raw, err)
+			return nil, fmt.Errorf("%w: line %d: %q: %w", ErrBlackoutParse, line, raw, err)
 		}
 		ranges = append(ranges, r)
 	}

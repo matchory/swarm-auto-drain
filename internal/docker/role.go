@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/system"
-	"github.com/matchory/swarm-auto-drain/internal/metrics"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 // Role identifies whether the local node currently acts as a swarm manager or worker.

@@ -16,9 +16,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/matchory/swarm-auto-drain/internal/metrics"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 // hop-by-hop headers (RFC 7230 §6.1) that an intermediary MUST strip and not
@@ -78,8 +79,9 @@ type Forwarder struct {
 // connection failure or 5xx responses.
 func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	ctx := r.Context()
 	defer func() {
-		f.Metrics.Duration.Record(r.Context(), time.Since(start).Seconds())
+		f.Metrics.Duration.Record(ctx, time.Since(start).Seconds())
 	}()
 
 	body, err := io.ReadAll(r.Body)
@@ -91,59 +93,73 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	attempts := f.Retries + 1
 	var lastErr error
 	for i := range attempts {
-		base, findErr := f.FindManagerURL()
-		if findErr != nil {
-			lastErr = findErr
-			f.recordAttempt(r.Context(), "connect_error")
-			if f.OnAttemptFailure != nil {
-				f.OnAttemptFailure()
-			}
-			continue
+		done, retryErr := f.attempt(w, r, body, i, attempts)
+		if done {
+			return
 		}
-		//nolint:gosec // SSRF: by design — this *is* a proxy; URL host is from trusted ManagerFinder
-		req, reqErr := http.NewRequestWithContext(r.Context(), r.Method, base+r.URL.RequestURI(), bytes.NewReader(body))
-		if reqErr != nil {
-			lastErr = reqErr
-			continue
+		if retryErr != nil {
+			lastErr = retryErr
 		}
-		copyHeaders(req.Header, r.Header)
-		req.Header.Set("X-Origin-Node", f.OriginNode)
-
-		//nolint:gosec // SSRF: see comment above; this proxy intentionally forwards client URLs
-		resp, doErr := f.Client.Do(req)
-		if doErr != nil {
-			lastErr = doErr
-			f.recordAttempt(r.Context(), classifyDoError(doErr))
-			if f.OnAttemptFailure != nil {
-				f.OnAttemptFailure()
-			}
-			continue
-		}
-		// 5xx — treat as a failed attempt. We invalidate the cached
-		// manager URL on EVERY 5xx, including the last attempt that
-		// gets propagated to the caller; otherwise the next request
-		// would re-hit the same sick manager. If we have retries left,
-		// loop; otherwise fall through and stream the 5xx upstream.
-		if resp.StatusCode >= http.StatusInternalServerError {
-			f.recordAttempt(r.Context(), "http_5xx")
-			if f.OnAttemptFailure != nil {
-				f.OnAttemptFailure()
-			}
-			if i < attempts-1 {
-				_ = resp.Body.Close()
-				lastErr = fmt.Errorf("%w: %d", errUpstream5xx, resp.StatusCode)
-				continue
-			}
-		} else {
-			f.recordAttempt(r.Context(), "ok")
-		}
-		copyHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		_ = resp.Body.Close()
-		return
 	}
 	http.Error(w, fmt.Sprintf("no manager available: %v", lastErr), http.StatusServiceUnavailable)
+}
+
+// attempt runs one forwarding attempt. It returns done=true when the response
+// (success or final-attempt 5xx) has been written and the caller must return.
+// Otherwise it returns the error that caused the attempt to fail; the caller
+// retains it for the final 503 message.
+func (f *Forwarder) attempt(
+	w http.ResponseWriter, r *http.Request, body []byte, i, attempts int,
+) (done bool, retryErr error) {
+	ctx := r.Context()
+	base, findErr := f.FindManagerURL()
+	if findErr != nil {
+		f.recordAttempt(ctx, "connect_error")
+		f.invalidate()
+		return false, findErr
+	}
+	//nolint:gosec // SSRF: by design — this *is* a proxy; URL host is from trusted ManagerFinder
+	req, reqErr := http.NewRequestWithContext(ctx, r.Method, base+r.URL.RequestURI(), bytes.NewReader(body))
+	if reqErr != nil {
+		return false, reqErr
+	}
+	copyHeaders(req.Header, r.Header)
+	req.Header.Set("X-Origin-Node", f.OriginNode)
+
+	//nolint:gosec // SSRF: see comment above; this proxy intentionally forwards client URLs
+	resp, doErr := f.Client.Do(req)
+	if doErr != nil {
+		f.recordAttempt(ctx, classifyDoError(doErr))
+		f.invalidate()
+		return false, doErr
+	}
+	// 5xx — treat as a failed attempt. We invalidate the cached
+	// manager URL on EVERY 5xx, including the last attempt that
+	// gets propagated to the caller; otherwise the next request
+	// would re-hit the same sick manager. If we have retries left,
+	// loop; otherwise fall through and stream the 5xx upstream.
+	if resp.StatusCode >= http.StatusInternalServerError {
+		f.recordAttempt(ctx, "http_5xx")
+		f.invalidate()
+		if i < attempts-1 {
+			_ = resp.Body.Close()
+			return false, fmt.Errorf("%w: %d", errUpstream5xx, resp.StatusCode)
+		}
+	} else {
+		f.recordAttempt(ctx, "ok")
+	}
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+	_ = resp.Body.Close()
+	return true, nil
+}
+
+// invalidate signals to ManagerFinder that the cached URL is stale.
+func (f *Forwarder) invalidate() {
+	if f.OnAttemptFailure != nil {
+		f.OnAttemptFailure()
+	}
 }
 
 // recordAttempt increments the attempts counter with the given outcome.

@@ -10,9 +10,10 @@ import (
 	"time"
 
 	"github.com/docker/docker/errdefs"
-	"github.com/matchory/swarm-auto-drain/internal/metrics"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 // docker is the subset of internal/docker.Client that ConfigStore needs.
@@ -64,7 +65,7 @@ func (s *ConfigStore) Release(ctx context.Context, holder string) error {
 }
 
 // recordAcquireOutcome increments the lock.acquire counter with the
-// outcome attribute. Centralised so every branch in tryAcquire records
+// outcome attribute. Centralized so every branch in tryAcquire records
 // with the same attribute shape.
 func (s *ConfigStore) recordAcquireOutcome(ctx context.Context, outcome string) {
 	s.Metrics.Acquire.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("outcome", outcome)))
@@ -110,7 +111,7 @@ func (s *ConfigStore) Inspect(ctx context.Context) (*Lock, error) {
 // so the stale-steal race protection (step 5) reads top-to-bottom alongside
 // the surrounding CAS steps — see the block comment at step 5.
 //
-//nolint:gocognit,gocyclo,cyclop,revive // stale-steal race protection must stay linear (see step 5).
+//nolint:gocognit,gocyclo,cyclop,revive,funlen // stale-steal race protection must stay linear (see step 5).
 func (s *ConfigStore) tryAcquire(
 	ctx context.Context, holder string, ttl time.Duration, retried bool,
 ) (AcquireResult, error) {

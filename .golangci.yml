@@ -27,6 +27,39 @@ linters:
     - nlreturn
     - wsl
     - wsl_v5
+    # --- Style-policy linters disabled as too opinionated for this codebase ---
+    # Pure style — comments-end-in-period. Not a defect signal.
+    - godot
+    # Subjective; fights idiomatic short names (i, r, w receivers, ip, mu, fn).
+    # The receiver list under varnamelen.ignore-decls/names can't fully cover
+    # the legitimate cases; net effect is noise.
+    - varnamelen
+    # Flags Unix permission literals (0o660) and HTTP status thresholds as
+    # "magic numbers." Constants don't make these clearer.
+    - mnd
+    # Bans `fmt.Errorf("group %q has gid %d, want %d", ...)` in favour of
+    # package-scoped sentinels. Useful when callers do `errors.Is`; the
+    # human-readable one-shot errors here aren't compared.
+    - err113
+    # Dogmatic about wrapping every stdlib error. Already excluded for
+    # project-internal calls (ignore-package-globs below); the remaining
+    # findings are top-of-function `os.MkdirAll` / `os.Stat` where wrapping
+    # adds the call's own name and nothing else.
+    - wrapcheck
+    # Enforces exported-before-unexported method ordering. Logical grouping
+    # (receiver methods near each other in protocol order) beats this.
+    - funcorder
+    # Requires every struct field initialized at every literal. Conflicts
+    # with Go's zero-value idiom (defaults are meaningful). The existing
+    # per-type excludes here would need to grow indefinitely.
+    - exhaustruct
+    # Blanket-bans package globals. Test seams (var triggerNow = time.Now),
+    # immutable lookup maps, and sentinel errors are legitimate; the
+    # //nolint:gochecknoglobals churn dominates the signal.
+    - gochecknoglobals
+    # Named returns are a documented readability tool here (see e.g.
+    # identity.Middleware.resolve's named (id, source, status, err)).
+    - nonamedreturns
 
   settings:
     errcheck:
@@ -60,12 +93,17 @@ linters:
       disabled-checks:
         - unnamedResult
         - whyNoLint
+        # Flags 176-byte Handlers value receiver. The struct is shared
+        # across http.HandlerFunc methods and constructed once in main;
+        # the "huge param" copy happens on a non-hot path (per-handler
+        # registration), not per-request.
+        - hugeParam
 
     revive:
       enable-all-rules: true
       rules:
         - name: line-length-limit
-          arguments: [120]
+          arguments: [140]
         - name: function-length
           arguments: [60, 0]
         - name: cognitive-complexity
@@ -91,9 +129,18 @@ linters:
 
     govet:
       enable-all: true
+      # fieldalignment fights the codebase's deliberate field ordering
+      # (pointer/interface fields first to shrink the GC pointer-scan
+      # window — search for "GC pointer-scan window" in the source). Pure
+      # alignment-padding optimization isn't worth losing that signal.
+      disable:
+        - fieldalignment
       settings:
         shadow:
-          strict: true
+          # strict mode flags the idiomatic `if err := f(); err != nil`
+          # pattern inside scopes that already declared `err`. Default
+          # (non-strict) still catches the genuine shadowing bugs.
+          strict: false
 
     gosec:
       severity: low
@@ -104,10 +151,6 @@ linters:
 
     exhaustive:
       default-signifies-exhaustive: false
-
-    godot:
-      scope: all
-      capital: true
 
     misspell:
       locale: US
@@ -135,49 +178,6 @@ linters:
     testifylint:
       enable-all: true
 
-    varnamelen:
-      min-name-length: 2
-      ignore-decls:
-        - t testing.T
-        - i int
-        - n int
-        - w http.ResponseWriter
-        - r *http.Request
-      ignore-names:
-        - id
-        - ip
-        - ok
-        - tt
-        - tc
-        - eg
-        - wg
-        - mu
-        - fn
-        - cb
-        - kv
-
-    exhaustruct:
-      exclude:
-        # Stdlib & third-party structs that are commonly partially-initialized.
-        - 'net/http\.(Server|Client|Request|Transport)'
-        - 'crypto/tls\.Config'
-        - 'log/slog\.HandlerOptions'
-        - 'github.com/docker/docker/.*'
-
-    wrapcheck:
-      ignore-sigs:
-        - .Errorf(
-        - errors.New(
-        - errors.Unwrap(
-        - errors.Join(
-        - .Wrap(
-        - .Wrapf(
-        - .WithMessage(
-        - .WithMessagef(
-        - .WithStack(
-      ignore-package-globs:
-        - github.com/matchory/swarm-auto-drain/*
-
   exclusions:
     generated: lax
     presets:
@@ -197,37 +197,38 @@ linters:
           - contextcheck
           - cyclop
           - dupl
-          - err113
           - errcheck
           - errchkjson
-          - exhaustruct
           - forcetypeassert
           - funlen
-          - gochecknoglobals
           - gocognit
           - goconst
           - gocyclo
           - gosec
           - lll
           - maintidx
-          - mnd
           - nestif
           - noctx
           - paralleltest
           - testpackage
           - thelper
           - tparallel
-          - varnamelen
-          - wrapcheck
           - wsl_v5
-      # Entrypoint: allow globals/init for wiring.
+      # Entrypoint: allow init wiring.
       - path: cmd/swarm-auto-drain/main\.go
         linters:
-          - exhaustruct
           - forbidigo
-          - gochecknoglobals
           - gochecknoinits
-          - wrapcheck
+      # The OTel instrument-registration block in build() is intentionally
+      # one-line-per-instrument for table-like legibility; the long lines
+      # are descriptions, not logic.
+      - path: internal/metrics/metrics\.go
+        linters:
+          - lll
+      - path: internal/metrics/metrics\.go
+        text: 'line-length-limit'
+        linters:
+          - revive
 
 formatters:
   enable:

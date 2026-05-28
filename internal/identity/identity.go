@@ -20,12 +20,15 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/matchory/swarm-auto-drain/internal/metrics"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 type ctxKey struct{}
+
+const sourceOverlay = "overlay"
 
 // NodeResolver maps an overlay-network source IP to the swarm node
 // hostname running the peer replica. Invalidate forces the next lookup
@@ -96,16 +99,16 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
 func (m Middleware) resolve(r *http.Request) (id, source string, status int, err error) {
 	host, _, perr := net.SplitHostPort(r.RemoteAddr)
 	if perr != nil {
-		return "", "overlay", http.StatusBadRequest, errBadRemote
+		return "", sourceOverlay, http.StatusBadRequest, errBadRemote
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return "", "overlay", http.StatusBadRequest, errBadRemote
+		return "", sourceOverlay, http.StatusBadRequest, errBadRemote
 	}
 	if ip.IsLoopback() {
 		return m.NodeHostname, "loopback", 0, nil
 	}
-	source = "overlay"
+	source = sourceOverlay
 	if m.Resolver == nil {
 		return "", source, http.StatusBadRequest, errNoResolver
 	}

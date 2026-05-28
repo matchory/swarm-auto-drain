@@ -1,5 +1,6 @@
-// Package metrics: see metrics.go.
 package metrics
+
+// See metrics.go for the package overview.
 
 import (
 	"context"
@@ -36,6 +37,8 @@ type ShutdownFunc func(context.Context) error
 //
 // With both ListenAddr and OTLPEndpoint empty, falls back to a noop
 // provider — domain code records as usual and the values go nowhere.
+//
+//nolint:gocyclo,cyclop,revive // sequential reader-setup; splitting hides the order callers depend on.
 func New(ctx context.Context, cfg Config) (Metrics, http.Handler, ShutdownFunc, error) {
 	if cfg.ListenAddr == "" && cfg.OTLPEndpoint == "" {
 		m, err := build(noop.NewMeterProvider().Meter(meterName))

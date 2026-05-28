@@ -16,7 +16,7 @@ func TestMetricsMiddleware_KnownRouteCounted(t *testing.T) {
 	})
 	h := api.Metrics(inner, m.HTTP)
 
-	req := httptest.NewRequest(http.MethodPost, "/lock", nil)
+	req := httptest.NewRequest(http.MethodPost, "/lock", http.NoBody)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -37,7 +37,7 @@ func TestMetricsMiddleware_UnknownRouteBucketsToOther(t *testing.T) {
 	})
 	h := api.Metrics(inner, m.HTTP)
 
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/garbage", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/garbage", http.NoBody))
 
 	points := metrics.FindCounter(t, reader, "swarm_auto_drain.http.requests")
 	_ = metrics.PointWithAttrs(t, points, "route", "other")
@@ -49,7 +49,7 @@ func TestMetricsMiddleware_DurationObserved(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	h := api.Metrics(inner, m.HTTP)
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/role", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/role", http.NoBody))
 
 	count := metrics.FindHistogramCount(t, reader, "swarm_auto_drain.http.duration")
 	if count == 0 {

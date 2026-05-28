@@ -11,7 +11,7 @@ type Config struct {
 	ListenAddr string
 	// OTLPEndpoint is the standard OTLP collector endpoint. Empty
 	// disables the OTLP push reader. Other OTLP env vars
-	// (OTEL_EXPORTER_OTLP_HEADERS, _INSECURE, etc.) are honoured by
+	// (OTEL_EXPORTER_OTLP_HEADERS, _INSECURE, etc.) are honored by
 	// the SDK's default-from-env constructor.
 	OTLPEndpoint string
 	// ServiceVersion populates the service.version resource attr.

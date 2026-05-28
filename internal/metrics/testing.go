@@ -1,9 +1,9 @@
-// Package metrics: see metrics.go. This file exposes helpers that other
-// packages' tests import to wire a ManualReader-backed provider and
-// inspect recorded data points. The helpers live in a regular .go file
-// (not _test.go) because Go does not export _test.go symbols across
-// packages.
 package metrics
+
+// This file exposes helpers that other packages' tests import to wire a
+// ManualReader-backed provider and inspect recorded data points. The helpers
+// live in a regular .go file (not _test.go) because Go does not export
+// _test.go symbols across packages.
 
 import (
 	"context"

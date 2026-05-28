@@ -3,6 +3,7 @@ package hostclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -122,7 +123,14 @@ func TestClient_AcquireLock(t *testing.T) {
 		wantStatus int
 		wantErr    bool
 	}{
-		{name: "201 acquired", respStatus: 201, respBody: `{"holder":"a","acquired_at":1748131200,"ttl_seconds":60}`, wantHolder: "a", wantTTL: 60, wantStatus: 201},
+		{
+			name:       "201 acquired",
+			respStatus: 201,
+			respBody:   `{"holder":"a","acquired_at":1748131200,"ttl_seconds":60}`,
+			wantHolder: "a",
+			wantTTL:    60,
+			wantStatus: 201,
+		},
 		{name: "410 stole", respStatus: 410, respBody: `{"holder":"b","ttl_seconds":30}`, wantHolder: "b", wantTTL: 30, wantStatus: 410},
 		{name: "409 held by other", respStatus: 409, respBody: `{"holder":"c"}`, wantHolder: "c", wantStatus: 409},
 		{name: "500 unexpected", respStatus: 500, respBody: "boom", wantErr: true},
@@ -139,24 +147,41 @@ func TestClient_AcquireLock(t *testing.T) {
 			}))
 			res, err := c.AcquireLock(context.Background())
 			if tc.wantErr {
-				if err == nil {
-					t.Fatal("err = nil, want error")
-				}
+				requireErr(t, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("err = %v", err)
-			}
-			if res.Status != tc.wantStatus {
-				t.Errorf("Status = %d, want %d", res.Status, tc.wantStatus)
-			}
-			if res.Lock.Holder != tc.wantHolder {
-				t.Errorf("Lock.Holder = %q, want %q", res.Lock.Holder, tc.wantHolder)
-			}
-			if res.Lock.TTLSeconds != tc.wantTTL {
-				t.Errorf("Lock.TTLSeconds = %d, want %d", res.Lock.TTLSeconds, tc.wantTTL)
-			}
+			requireNoErr(t, err)
+			assertAcquire(t, res, tc.wantStatus, tc.wantHolder, tc.wantTTL)
 		})
+	}
+}
+
+func assertAcquire(t *testing.T, res LockAcquireResult, wantStatus int, wantHolder string, wantTTL int) {
+	t.Helper()
+	if res.Status != wantStatus {
+		t.Errorf("Status = %d, want %d", res.Status, wantStatus)
+	}
+	if res.Lock.Holder != wantHolder {
+		t.Errorf("Lock.Holder = %q, want %q", res.Lock.Holder, wantHolder)
+	}
+	if res.Lock.TTLSeconds != wantTTL {
+		t.Errorf("Lock.TTLSeconds = %d, want %d", res.Lock.TTLSeconds, wantTTL)
+	}
+}
+
+// requireErr fails the test unless err is non-nil.
+func requireErr(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("err = nil, want error")
+	}
+}
+
+// requireNoErr fails the test if err is non-nil.
+func requireNoErr(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -182,14 +207,10 @@ func TestClient_ReleaseLock(t *testing.T) {
 			}))
 			status, err := c.ReleaseLock(context.Background())
 			if tc.wantErr {
-				if err == nil {
-					t.Fatal("err = nil, want error")
-				}
+				requireErr(t, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("err = %v", err)
-			}
+			requireNoErr(t, err)
 			if status != tc.wantStatus {
 				t.Errorf("status = %d, want %d", status, tc.wantStatus)
 			}
@@ -265,7 +286,7 @@ func TestClient_DialError(t *testing.T) {
 func TestClient_ContextDeadline(t *testing.T) {
 	// Handler blocks forever; the caller's context cancellation must unblock
 	// the request rather than hanging until the default 30s client timeout.
-	c := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := serve(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -292,5 +313,5 @@ func TestClient_CustomHTTPClient(t *testing.T) {
 type errTransport struct{}
 
 func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, fmt.Errorf("injected")
+	return nil, errors.New("injected")
 }

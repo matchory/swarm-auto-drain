@@ -9,6 +9,7 @@ package stackgen
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"text/template"
@@ -65,8 +66,8 @@ func Render(w io.Writer, opts Options) error {
 		return fmt.Errorf("parse template: %w", err)
 	}
 	var rendered bytes.Buffer
-	if err := tmpl.Execute(&rendered, opts); err != nil {
-		return fmt.Errorf("render template: %w", err)
+	if execErr := tmpl.Execute(&rendered, opts); execErr != nil {
+		return fmt.Errorf("render template: %w", execErr)
 	}
 
 	// Defense-in-depth: when AllowUnencrypted is false, the rendered
@@ -74,7 +75,7 @@ func Render(w io.Writer, opts Options) error {
 	// otherwise silently produce a plaintext-overlay stack that the
 	// runtime would refuse to start against. Fail loud here.
 	if !opts.AllowUnencrypted && !bytes.Contains(rendered.Bytes(), []byte(`encrypted: "true"`)) {
-		return fmt.Errorf("rendered stack is missing `encrypted: \"true\"`; refusing")
+		return errors.New("rendered stack is missing `encrypted: \"true\"`; refusing")
 	}
 
 	_, err = w.Write(rendered.Bytes())

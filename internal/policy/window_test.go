@@ -71,15 +71,7 @@ func TestParseWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseWindow(tc.input)
 			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("want error, got nil; window=%+v", got)
-				}
-				if !errors.Is(err, ErrWindowParse) {
-					t.Errorf("err = %v, want errors.Is(ErrWindowParse)", err)
-				}
-				if tc.errFrag != "" && !strings.Contains(err.Error(), tc.errFrag) {
-					t.Errorf("err = %q, want fragment %q", err.Error(), tc.errFrag)
-				}
+				assertParseWindowErr(t, err, tc.errFrag)
 				return
 			}
 			if err != nil {
@@ -91,16 +83,34 @@ func TestParseWindow(t *testing.T) {
 				}
 				return
 			}
-			if !sameWeekdays(got.Days, tc.wantDays) {
-				t.Errorf("Days = %v, want %v", got.Days, tc.wantDays)
-			}
-			if got.Start != tc.wantStart {
-				t.Errorf("Start = %v, want %v", got.Start, tc.wantStart)
-			}
-			if got.End != tc.wantEnd {
-				t.Errorf("End = %v, want %v", got.End, tc.wantEnd)
-			}
+			assertWindowFields(t, got, tc.wantDays, tc.wantStart, tc.wantEnd)
 		})
+	}
+}
+
+func assertParseWindowErr(t *testing.T, err error, errFrag string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if !errors.Is(err, ErrWindowParse) {
+		t.Errorf("err = %v, want errors.Is(ErrWindowParse)", err)
+	}
+	if errFrag != "" && !strings.Contains(err.Error(), errFrag) {
+		t.Errorf("err = %q, want fragment %q", err.Error(), errFrag)
+	}
+}
+
+func assertWindowFields(t *testing.T, got Window, wantDays []time.Weekday, wantStart, wantEnd time.Duration) {
+	t.Helper()
+	if !sameWeekdays(got.Days, wantDays) {
+		t.Errorf("Days = %v, want %v", got.Days, wantDays)
+	}
+	if got.Start != wantStart {
+		t.Errorf("Start = %v, want %v", got.Start, wantStart)
+	}
+	if got.End != wantEnd {
+		t.Errorf("End = %v, want %v", got.End, wantEnd)
 	}
 }
 

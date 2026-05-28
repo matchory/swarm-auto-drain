@@ -5,9 +5,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/matchory/swarm-auto-drain/internal/metrics"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
+
+	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
 // knownRoutes is the fixed allowlist of route templates. Unknown paths
@@ -42,10 +43,11 @@ func Metrics(next http.Handler, m metrics.HTTPMetrics) http.Handler {
 		if route == "" {
 			route = "other"
 		}
-		baseAttrs := []attribute.KeyValue{
+		baseAttrs := make([]attribute.KeyValue, 0, 3)
+		baseAttrs = append(baseAttrs,
 			attribute.String("method", r.Method),
 			attribute.String("route", route),
-		}
+		)
 		m.Requests.Add(r.Context(), 1, otelmetric.WithAttributes(
 			append(baseAttrs, attribute.String("status", strconv.Itoa(sr.status)))...,
 		))

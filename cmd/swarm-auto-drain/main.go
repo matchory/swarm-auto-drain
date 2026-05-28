@@ -78,7 +78,7 @@ subcommands:
   run        start the coordinator daemon (default if no subcommand given)
   trigger    host-side: check policy and coordinate a reboot
   resume     host-side: re-activate after coordinated reboot
-  install    install systemd units and env file on this host
+  install    set up systemd units and env file on this host
   uninstall  remove the systemd units installed by install
   stack      render the docker-stack YAML to stdout
   version    print version and exit
