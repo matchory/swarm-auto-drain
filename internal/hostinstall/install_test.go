@@ -12,6 +12,20 @@ import (
 	"testing"
 )
 
+// TestEnvTemplateUsesCanonicalSocketPath guards against the embedded env
+// file's COORDINATOR_SOCKET value drifting from hostinstall.SocketPath, the
+// single source of truth the daemon and host CLI also derive from.
+func TestEnvTemplateUsesCanonicalSocketPath(t *testing.T) {
+	data, err := embeddedFiles.ReadFile(filepath.Join(embedFilesRoot, "swarm-auto-drain.env"))
+	if err != nil {
+		t.Fatalf("read embedded env: %v", err)
+	}
+	want := "COORDINATOR_SOCKET=" + SocketPath
+	if !strings.Contains(string(data), want) {
+		t.Errorf("embedded env file missing %q (socket path drifted from hostinstall.SocketPath)", want)
+	}
+}
+
 // fakeRunner records invocations and returns programmable per-call
 // results. nil err → success with empty output. The mutex covers tests
 // that might exercise concurrent calls in the future; current callers

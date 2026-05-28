@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/matchory/swarm-auto-drain/internal/hostclient"
+	"github.com/matchory/swarm-auto-drain/internal/hostinstall"
 	"github.com/matchory/swarm-auto-drain/internal/policy"
 )
 
@@ -20,7 +21,10 @@ import (
 // override via /etc/default/swarm-auto-drain which systemd loads before
 // ExecStart.
 const (
-	defaultCoordinatorSocket = "/var/run/swarm-auto-drain/coord.sock"
+	// defaultCoordinatorSocket reuses the single source of truth in
+	// hostinstall so the daemon, the host CLI, and the installed env file
+	// cannot drift apart.
+	defaultCoordinatorSocket = hostinstall.SocketPath
 	defaultDisabledFile      = "/etc/swarm-auto-drain/disabled"
 	defaultSentinelFile      = "/var/run/reboot-required"
 	defaultResumeSentinel    = "/var/lib/swarm-auto-drain/draining"

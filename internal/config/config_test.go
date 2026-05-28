@@ -3,7 +3,19 @@ package config
 import (
 	"testing"
 	"time"
+
+	"github.com/matchory/swarm-auto-drain/internal/hostinstall"
 )
+
+// TestSocketPathSingleSourceOfTruth guards against the daemon's default Unix
+// socket path drifting from the canonical hostinstall.SocketPath that the host
+// CLI and the installed env file derive from.
+func TestSocketPathSingleSourceOfTruth(t *testing.T) {
+	if defaultUnixSocketPath != hostinstall.SocketPath {
+		t.Errorf("defaultUnixSocketPath = %q, want %q (hostinstall.SocketPath)",
+			defaultUnixSocketPath, hostinstall.SocketPath)
+	}
+}
 
 func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("NODE_HOSTNAME", "test-node")
