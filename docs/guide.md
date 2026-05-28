@@ -5,8 +5,8 @@ Two commands to deploy a cluster, both idempotent.
 ## On every node
 
 ```bash
-curl -sSL https://github.com/matchory/swarm-auto-drain/releases/download/v0.2.0/install.sh \
-  | sudo VERSION=v0.2.0 UNIX_SOCKET_GID=9999 bash
+curl -sSL https://github.com/matchory/swarm-auto-drain/releases/download/v1.0.0/install.sh \
+  | sudo VERSION=v1.0.0 UNIX_SOCKET_GID=9999 bash
 ```
 
 The bootstrap script downloads the matching `swarm-auto-drain-linux-<arch>`

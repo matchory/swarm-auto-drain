@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Curl-bashable bootstrap for swarm-auto-drain.
 #
-#   curl -sSL https://github.com/matchory/swarm-auto-drain/releases/download/v0.2.0/install.sh \
-#     | sudo VERSION=v0.2.0 UNIX_SOCKET_GID=9999 bash
+#   curl -sSL https://github.com/matchory/swarm-auto-drain/releases/download/v1.0.0/install.sh \
+#     | sudo VERSION=v1.0.0 UNIX_SOCKET_GID=9999 bash
 #
 # Re-runnable. Verifies the binary's SHA-256 against the matching .sha256
 # file published with the release before placing it under /usr/local/sbin.

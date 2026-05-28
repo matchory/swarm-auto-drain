@@ -13,8 +13,8 @@ Two commands. Both idempotent.
 **1. On every host** — installs the binary, the systemd timer + units, and the `swarm-coord` group:
 
 ```bash
-curl -sSL https://github.com/matchory/swarm-auto-drain/releases/download/v0.2.0/install.sh \
-  | sudo VERSION=v0.2.0 UNIX_SOCKET_GID=9999 bash
+curl -sSL https://github.com/matchory/swarm-auto-drain/releases/download/v1.0.0/install.sh \
+  | sudo VERSION=v1.0.0 UNIX_SOCKET_GID=9999 bash
 ```
 
 The bootstrap verifies a SHA-256 against the matching `.sha256` file
@@ -102,7 +102,7 @@ The stack file ships both knobs commented out. See [`docs/specs/2026-05-27-metri
 
 ## Status
 
-Beta — observability available; the HTTP contract is not yet frozen. Specs under `docs/specs/`, design history in `docs/plans/`. Originally extracted from internal Matchory Puppet infrastructure for the `tier: docker_swarm` case in `updates::reboot`.
+Stable. The HTTP contract, env var names, on-disk install layout, and subcommand surface are covered by semver as of v1.0.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the compatibility statement. Specs under `docs/specs/`, design history in `docs/plans/`. Originally extracted from internal Matchory Puppet infrastructure for the `tier: docker_swarm` case in `updates::reboot`.
 
 ## Hacking on the project
 
