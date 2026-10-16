@@ -18,6 +18,9 @@ const (
 	defaultForwardTimeout      = 60 * time.Second
 	defaultManagerDiscoveryTTL = 60 * time.Second
 	defaultMetricsPushInterval = 15 * time.Second
+	// A reboot keeps a node out of Ready far longer than this, so the
+	// leader's reactivation loop sees the down state between two polls.
+	defaultReactivateInterval = 5 * time.Second
 	// DefaultUnixSocketMode is intentionally group-readable/writable so
 	// the host-side script's runtime user (typically a dedicated group
 	// like `swarm-coord`) can call the coordinator without being root.
@@ -68,6 +71,7 @@ type Config struct {
 	ForwardTimeout          time.Duration
 	ManagerDiscoveryTTL     time.Duration
 	MetricsPushInterval     time.Duration
+	ReactivateInterval      time.Duration
 	UnixSocketGID           int
 	UnixSocketMode          os.FileMode
 	AllowUnencryptedOverlay bool
@@ -105,6 +109,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	reactivateInterval, err := envSecs("REACTIVATE_INTERVAL_SECONDS", defaultReactivateInterval)
+	if err != nil {
+		return nil, err
+	}
 	unixSocketMode, err := envOctal("UNIX_SOCKET_MODE", defaultUnixSocketMode)
 	if err != nil {
 		return nil, err
@@ -129,6 +137,7 @@ func Load() (*Config, error) {
 		ForwardTimeout:          forwardTimeout,
 		ManagerDiscoveryTTL:     managerDiscoveryTTL,
 		MetricsPushInterval:     metricsPushInterval,
+		ReactivateInterval:      reactivateInterval,
 		UnixSocketMode:          unixSocketMode,
 		UnixSocketGID:           unixSocketGID,
 		AllowUnencryptedOverlay: envBool("ALLOW_UNENCRYPTED_OVERLAY"),

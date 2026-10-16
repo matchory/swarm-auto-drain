@@ -59,6 +59,7 @@ match the embedded template the install subcommand writes:
 | `BLACKOUT_FILE` | `/etc/swarm-auto-drain/blackout` | Optional date-range blocklist. |
 | `LOCK_TIMEOUT_SECONDS` | `60` | Per-call HTTP timeout for `/lock`. |
 | `DRAIN_TIMEOUT_SECONDS` | `600` | Per-call HTTP timeout for `/drain`. |
+| `RESUME_TIMEOUT_SECONDS` | `900` | How long `resume` waits after boot for the node to be active again. |
 
 ### Reboot window
 
@@ -130,3 +131,13 @@ unit via `ConditionPathExists` so non-coordinated boots (kernel panic,
 power loss, manual `reboot`) do not run the resume logic. This prevents
 the resume service from firing on every boot and prevents clobbering an
 operator's deliberate `availability=drain` setting.
+
+Resume does not reactivate the node itself: the drained node has no
+coordinator replica (Swarm stops every task on a drained node) and a worker
+has no manager API. The leader's replica sets the node active and releases
+the lock once it has seen the node go down and come back. Resume waits until
+the local socket answers again (the replica is rescheduled only on an active
+node), then removes the sentinel. If that does not happen within
+`RESUME_TIMEOUT_SECONDS` it exits 1, keeps the sentinel, and the node stays
+drained for the operator. See
+[`specs/2026-10-16-leader-reactivation.md`](specs/2026-10-16-leader-reactivation.md).

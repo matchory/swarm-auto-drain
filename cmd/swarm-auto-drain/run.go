@@ -22,6 +22,7 @@ import (
 	"github.com/matchory/swarm-auto-drain/internal/lock"
 	"github.com/matchory/swarm-auto-drain/internal/logging"
 	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"github.com/matchory/swarm-auto-drain/internal/reactivate"
 )
 
 const (
@@ -132,8 +133,9 @@ func run(cfg *config.Config) error {
 	// available on any node, so it never trips the refresh check).
 	dcli = dockerpkg.WithRoleRefresh(dcli, role)
 
-	handlers, mw, fwd := buildCollaborators(cfg, dcli, role, mtr, serviceName)
+	handlers, mw, fwd, reconciler := buildCollaborators(cfg, dcli, role, mtr, serviceName)
 	overlayHandler, hostHandler := buildRoleSwitchedHandlers(cfg, role, &handlers, mw, fwd)
+	go reconciler.Run(ctx)
 
 	listeners, err := bindListeners(ctx, cfg, overlayHandler, hostHandler, metricsHandler)
 	if err != nil {
@@ -157,15 +159,16 @@ func run(cfg *config.Config) error {
 }
 
 // buildCollaborators constructs the lock store, drainer, HTTP handlers,
-// identity middleware, and forwarder. dcli must already be wrapped with the
-// role-refresh decorator before being passed in.
+// identity middleware, forwarder, and the leader's reactivation loop. dcli
+// must already be wrapped with the role-refresh decorator before being
+// passed in.
 func buildCollaborators(
 	cfg *config.Config,
 	dcli dockerpkg.Client,
 	role *dockerpkg.RoleDetector,
 	mtr metrics.Metrics,
 	serviceName string,
-) (api.Handlers, identity.Middleware, *forward.Forwarder) {
+) (api.Handlers, identity.Middleware, *forward.Forwarder, *reactivate.Reconciler) {
 	// Now field intentionally left as the package's default (time.Now);
 	// tests inject a fake via the package directly.
 	//nolint:exhaustruct // Now defaults to time.Now
@@ -179,6 +182,9 @@ func buildCollaborators(
 		DrainTimeout: cfg.DrainTimeout,
 		PollInterval: pollIntervalDrain,
 		Role:         func() string { return role.Role().String() },
+		NodeID: func(ctx context.Context, hostname string) (string, error) {
+			return nodeIDByHostname(ctx, dcli, hostname)
+		},
 		Version:      version,
 		HTTPMetrics:  mtr.HTTP,
 		DrainMetrics: mtr.Drain,
@@ -204,11 +210,28 @@ func buildCollaborators(
 		OriginNode:       cfg.NodeHostname,
 		FindManagerURL:   finder.Find,
 		OnAttemptFailure: finder.Invalidate,
-		Client:           &http.Client{Timeout: cfg.ForwardTimeout},
+		Client:           &http.Client{Timeout: forwardTimeout(cfg)},
 		Retries:          forwardRetries,
 		Metrics:          mtr.Forward,
 	}
-	return handlers, mw, fwd
+	reconciler := &reactivate.Reconciler{
+		Cluster:   reactivateAdapter{dcli},
+		Store:     store,
+		IsManager: func() bool { return role.Role() == dockerpkg.RoleManager },
+		Metrics:   mtr.Reactivate,
+		Interval:  cfg.ReactivateInterval,
+	}
+	return handlers, mw, fwd, reconciler
+}
+
+// forwardTimeout is the worker→manager request timeout. A forwarded /drain
+// is held open by the manager for up to DrainTimeout plus the handler's
+// slack, so the forwarder must wait at least that long or it would cut a
+// running drain off and report a failure for a drain that still completes.
+// One client serves every path; a hung manager therefore also holds other
+// forwarded requests that long, which only delays a failure.
+func forwardTimeout(cfg *config.Config) time.Duration {
+	return max(cfg.ForwardTimeout, cfg.DrainTimeout+shutdownGraceExtra)
 }
 
 // buildRoleSwitchedHandlers builds the two listener-specific HTTP handlers

@@ -39,6 +39,7 @@ synchronizing.
 - **Global Swarm service**, one replica per node, same image on managers and workers. At startup each replica reads `docker info` and decides whether to handle requests in-process (manager) or forward to a peer manager over the overlay network (worker). `docker node promote`/`demote` takes effect on the next request — no restart needed.
 - **Two listeners per replica.** A Unix socket on the host for the safe-reboot script; a TCP listener on the encrypted overlay for worker → manager forwarding. Each has its own trust model — see [Security](#security).
 - **Cluster-wide mutex** lives in a Docker Config (`swarm-auto-drain-lock`). `docker config create` is atomic on the name — create-fails-on-exists is the CAS primitive. Stale locks (older than `LOCK_TTL_SECONDS`) are reclaimed race-safely.
+- **Reactivation by the leader.** Draining stops every task on a node, the coordinator's own replica included, and workers have no manager API, so a rebooted node cannot undo its own drain. The replica on the raft leader does: it follows the drain mark on the lock, waits until the holder has gone down and come back Ready, sets it active and releases the lock. See [`docs/specs/2026-10-16-leader-reactivation.md`](docs/specs/2026-10-16-leader-reactivation.md).
 - **Manager quorum guard.** A manager refuses to drain itself unless `floor(N/2) + 1` other managers remain reachable.
 - **Caller identity** is the node hostname. Loopback / Unix socket → the replica's own `NODE_HOSTNAME`. Overlay → derived server-side from the source IP by looking up the swarm task list. The `X-Origin-Node` header is advisory and rejected on mismatch.
 
@@ -69,7 +70,8 @@ All knobs are env vars. The reference stack file sets the ones operators normall
 | `LOCK_TTL_SECONDS` | `1800` | How long the cluster reboot lock can be held before a peer reclaims it as stale. |
 | `DRAIN_TIMEOUT_SECONDS` | `300` | Max time to wait for tasks to drain off a node. |
 | `ROLE_RECHECK_SECONDS` | `30` | How often to re-check manager/worker role from the local Docker daemon. |
-| `FORWARD_TIMEOUT_SECONDS` | `60` | Per-attempt timeout for worker → manager forwarding. |
+| `FORWARD_TIMEOUT_SECONDS` | `60` | Per-attempt timeout for worker → manager forwarding. Never below `DRAIN_TIMEOUT_SECONDS` + 30s, so a forwarded `/drain` is not cut off. |
+| `REACTIVATE_INTERVAL_SECONDS` | `5` | How often the leader checks whether a rebooted lock holder is back. |
 | `MANAGER_DISCOVERY_TTL_SECONDS` | `60` | How long a worker caches the manager-IP it forwards to. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
 | `LOCK_CONFIG_NAME` | `swarm-auto-drain-lock` | The Docker Config name used as the cluster mutex. |
@@ -83,8 +85,8 @@ All endpoints are served on both listeners; the host script talks to the Unix so
 |---|---|---|
 | `POST` | `/lock` | Acquire the cluster reboot lock. `201` on acquire, `410` on stale-steal, `409` if held by someone else. |
 | `DELETE` | `/lock` | Release the lock. `204` if you held it, `403` if a peer took over, `404` if no lock. |
-| `POST` | `/drain` | Drain the caller's node. `200` on success, `408` on timeout, `503` if quorum guard would be violated. |
-| `POST` | `/active` | Set the caller's node back to availability=active. |
+| `POST` | `/drain` | Drain the caller's node. `200` on success, `408` on timeout, `503` if quorum guard would be violated. If the caller holds the lock, it is marked so the leader reactivates the node after its reboot. |
+| `POST` | `/active` | Set the caller's node back to availability=active. Not needed after a coordinated reboot. |
 | `GET` | `/healthz` | Liveness — always `200`. |
 | `GET` | `/role` | `{"role":"manager"|"worker","leader":"<host>"}`. |
 | `GET` | `/managers/health` | `{"reachable":N,"total":M,"leader":"<host>"}` — diagnostics. |

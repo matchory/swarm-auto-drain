@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -12,13 +14,22 @@ import (
 	"github.com/matchory/swarm-auto-drain/internal/metrics"
 )
 
+// fakeDocker models one named Config with Swarm's identity semantics: each
+// create gets a fresh ID, references resolve by name or by the current ID,
+// and label updates are optimistic on the object version.
 type fakeDocker struct {
-	mu     sync.Mutex
-	data   []byte
-	exists bool
+	mu      sync.Mutex
+	data    []byte
+	labels  map[string]string
+	id      string
+	creates int
+	version uint64
+	exists  bool
 }
 
-func (f *fakeDocker) ConfigCreate(_ context.Context, _ string, data []byte, _ map[string]string) (string, error) {
+const errNoSuchConfig = "Error: no such config"
+
+func (f *fakeDocker) ConfigCreate(_ context.Context, _ string, data []byte, labels map[string]string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.exists {
@@ -27,28 +38,61 @@ func (f *fakeDocker) ConfigCreate(_ context.Context, _ string, data []byte, _ ma
 				"desc = name conflicts with an existing object",
 		)
 	}
+	f.creates++
 	f.data = append([]byte(nil), data...)
+	f.labels = labels
+	f.id = fmt.Sprintf("cfg-%d", f.creates)
+	f.version = 1
 	f.exists = true
-	return "fake-id", nil
+	return f.id, nil
 }
 
-func (f *fakeDocker) ConfigInspect(_ context.Context, _ string) ([]byte, map[string]string, error) {
+// resolves reports whether ref names the current instance. Callers hold mu.
+func (f *fakeDocker) resolves(ref string) bool {
+	return f.exists && (ref == "lock" || ref == f.id)
+}
+
+func (f *fakeDocker) ConfigInspect(_ context.Context, ref string) ([]byte, map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.exists {
-		return nil, nil, errors.New("Error: no such config")
+	if !f.resolves(ref) {
+		return nil, nil, errors.New(errNoSuchConfig)
 	}
-	return append([]byte(nil), f.data...), nil, nil
+	return append([]byte(nil), f.data...), maps.Clone(f.labels), nil
 }
 
-func (f *fakeDocker) ConfigRemove(_ context.Context, _ string) error {
+func (f *fakeDocker) ConfigRemove(_ context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.exists {
-		return errors.New("Error: no such config")
+	if !f.resolves(ref) {
+		return errors.New(errNoSuchConfig)
 	}
 	f.exists = false
 	f.data = nil
+	f.labels = nil
+	return nil
+}
+
+func (f *fakeDocker) ConfigMeta(_ context.Context, ref string) (string, uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.resolves(ref) {
+		return "", 0, errors.New(errNoSuchConfig)
+	}
+	return f.id, f.version, nil
+}
+
+func (f *fakeDocker) ConfigUpdateLabels(_ context.Context, id string, version uint64, labels map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.exists || id != f.id {
+		return errors.New(errNoSuchConfig)
+	}
+	if version != f.version {
+		return errors.New("rpc error: code = Unknown desc = update out of sequence")
+	}
+	f.labels = maps.Clone(labels)
+	f.version++
 	return nil
 }
 
@@ -146,6 +190,14 @@ func (c *clobberDocker) ConfigInspect(_ context.Context, _ string) ([]byte, map[
 
 func (c *clobberDocker) ConfigRemove(_ context.Context, _ string) error {
 	c.exists = false
+	return nil
+}
+
+func (*clobberDocker) ConfigMeta(context.Context, string) (string, uint64, error) {
+	return "id", 1, nil
+}
+
+func (*clobberDocker) ConfigUpdateLabels(context.Context, string, uint64, map[string]string) error {
 	return nil
 }
 

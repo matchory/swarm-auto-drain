@@ -121,7 +121,7 @@ All names are prefixed `swarm_auto_drain_`. Histograms use the `_seconds` suffix
 | Name | Type | Labels | Notes |
 |---|---|---|---|
 | `lock_acquire_total` | counter | `outcome={acquired,eexist,stolen,error}` | One increment per `Acquire` call |
-| `lock_release_total` | counter | `outcome={released,not_holder,not_found,error}` | One increment per `Release` call |
+| `lock_release_total` | counter | `outcome={released,reactivated,not_holder,not_found,error}` | One increment per `Release` call, and per leader-side release after a reboot (`reactivated`) |
 | `lock_steals_total` | counter | `reason={ttl_expired}` | Leading indicator of crashed holders |
 | `lock_hold_seconds` | histogram | — | Recorded on the release path; SLO input |
 | `lock_held` | gauge | — | 1 if this replica currently holds a lock, 0 otherwise |
@@ -166,7 +166,13 @@ All names are prefixed `swarm_auto_drain_`. Histograms use the `_seconds` suffix
 
 `route` is the **template** path drawn from a fixed allowlist (`/healthz`, `/role`, `/managers/health`, `/lock`, `/drain`, `/active`, `/metrics`). Unknown paths bucket to `route="other"` so the label is bounded at 8 values regardless of probe traffic.
 
-### 4.7 Runtime
+### 4.7 Reactivation
+
+| Name | Type | Labels | Notes |
+|---|---|---|---|
+| `reactivate_steps_total` | counter | `step={down_seen,activate,release}, outcome={ok,noop,error}` | Leader-only post-reboot loop; see `2026-10-16-leader-reactivation.md` |
+
+### 4.8 Runtime
 
 Registered via `go.opentelemetry.io/contrib/instrumentation/runtime` with default options. Provides:
 

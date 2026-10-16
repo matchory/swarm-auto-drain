@@ -87,6 +87,12 @@ The cluster-wide reboot mutex lives in a single Docker Config named `swarm-auto-
 
 `/drain` first runs `QuorumOK`: a manager refuses to drain unless `floor(N/2)+1` *other* managers remain reachable. Only then sets availability to `drain` and polls until task count hits zero or `DrainTimeout` elapses. The HTTP handler wraps the drain call in `DrainTimeout + 30s` so the operation can run to completion rather than being cut off by an upstream client deadline; the server's shutdown grace is sized the same way (`DrainTimeout + 30s`) so SIGTERM doesn't truncate an in-flight drain.
 
+Draining stops **every** task on the node, including this coordinator's replica on it. When the caller holds the lock, `/drain` first writes a drain mark (labels on the lock Config, `internal/lock/drain_mark.go`); failing to write it aborts the drain.
+
+### Reactivation (`internal/reactivate`)
+
+The replica on the raft leader (re-checked every tick) reactivates a marked lock holder after its reboot: it records `down-seen-at` once the node is `down`/`disconnected`/raft-`unreachable` (never `unknown` — every node is `unknown` after an election), then on `ready` sets it active (drain→active compare-and-set) and removes the lock Config **by ID**, so only the instance it read. All progress is in the labels so a new leader resumes mid-way. Never relax "observed down, then Ready" to a time-based guess, and never act on an unmarked lock — that is what keeps manually drained nodes untouched. The host-side `resume` only waits for its local replica to answer, which happens once the node is active. Design + failure modes: `docs/specs/2026-10-16-leader-reactivation.md`.
+
 ### Forwarding (`internal/forward`)
 
 `Forwarder` proxies worker requests to a manager. It strips RFC 7230 hop-by-hop headers, injects `X-Origin-Node` (advisory — the manager verifies it against the source IP), retries on connection failure or 5xx, and invalidates the cached manager URL on every failed attempt (via `OnAttemptFailure → ManagerFinder.Invalidate`) so retries don't pile onto a dead replica. `ManagerFinder` does DNS lookup on `tasks.<service-name>` (service name self-discovered at startup), probes `/role` on each returned IP, and caches the first one reporting `"manager"`.

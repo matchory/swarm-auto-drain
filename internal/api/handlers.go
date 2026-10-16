@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -25,6 +26,10 @@ type Handlers struct {
 	Store   lock.Store
 	Drainer drain.Drainer
 	Role    func() string
+	// NodeID resolves a node hostname to its swarm node ID; the drain mark
+	// records the ID so a node re-joined under the same hostname is never
+	// mistaken for the drained one.
+	NodeID func(ctx context.Context, hostname string) (string, error)
 	// Version is the daemon binary's version string, surfaced in /role so
 	// host-side clients can detect daemon-vs-host skew. Empty when unset.
 	Version      string
@@ -151,6 +156,12 @@ func (h Handlers) drain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if markErr := h.markDrained(r.Context(), id); markErr != nil {
+		slog.Error("drain not started", "node", id, "err", markErr)
+		http.Error(w, markErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), h.DrainTimeout+30*time.Second)
 	defer cancel()
 	res, err := h.Drainer.Drain(ctx, id, h.DrainTimeout, h.PollInterval)
@@ -168,6 +179,30 @@ func (h Handlers) drain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// markDrained records on the lock that this is the holder's reboot drain,
+// so the leader reactivates the node once it has rebooted and is back. It
+// runs before the drain: a drained holder without a mark would stay drained
+// after its reboot, so any failure to write it aborts the drain. A caller
+// that does not hold the lock is drained unmarked, as before, and is not
+// reactivated automatically.
+func (h Handlers) markDrained(ctx context.Context, id string) error {
+	nodeID, err := h.NodeID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("resolve node id: %w", err)
+	}
+	err = h.Store.MarkDrained(ctx, id, nodeID)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, lock.ErrNoLock), errors.Is(err, lock.ErrNotHolder):
+		slog.Warn("draining a node that does not hold the lock; it will not be reactivated automatically",
+			"node", id)
+		return nil
+	default:
+		return fmt.Errorf("mark drained: %w", err)
+	}
 }
 
 func (h Handlers) active(w http.ResponseWriter, r *http.Request) {

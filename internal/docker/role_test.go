@@ -39,6 +39,22 @@ func (f *fakeClient) ConfigInspect(context.Context, string) ([]byte, map[string]
 	return nil, nil, f.nextErr
 }
 func (f *fakeClient) ConfigRemove(context.Context, string) error { return f.nextErr }
+func (f *fakeClient) ConfigMeta(context.Context, string) (string, uint64, error) {
+	return "", 0, f.nextErr
+}
+
+func (f *fakeClient) ConfigUpdateLabels(context.Context, string, uint64, map[string]string) error {
+	return f.nextErr
+}
+
+func (f *fakeClient) NodeInspect(context.Context, string) (NodeSummary, error) {
+	return NodeSummary{}, f.nextErr
+}
+
+func (f *fakeClient) NodeUpdateAvailabilityIf(context.Context, string, string, string) (bool, error) {
+	return false, f.nextErr
+}
+
 func (f *fakeClient) NodeList(context.Context, map[string][]string) ([]NodeSummary, error) {
 	return nil, f.nextErr
 }

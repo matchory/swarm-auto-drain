@@ -23,6 +23,8 @@ type docker interface {
 	ConfigCreate(ctx context.Context, name string, data []byte, labels map[string]string) (string, error)
 	ConfigInspect(ctx context.Context, name string) (data []byte, labels map[string]string, err error)
 	ConfigRemove(ctx context.Context, name string) error
+	ConfigMeta(ctx context.Context, name string) (id string, version uint64, err error)
+	ConfigUpdateLabels(ctx context.Context, id string, version uint64, labels map[string]string) error
 }
 
 // ConfigStore implements Store on top of the Docker SDK's Config primitives.
@@ -232,16 +234,14 @@ func (s *ConfigStore) tryAcquire(
 }
 
 func (s *ConfigStore) loadCurrent(ctx context.Context) (*Lock, error) {
-	data, _, err := s.Docker.ConfigInspect(ctx, s.ConfigName)
-	if err != nil {
-		if isNotFound(err) {
-			return nil, ErrNoLock
-		}
-		return nil, fmt.Errorf("config inspect: %w", err)
-	}
+	doc, _, err := s.loadByRef(ctx, s.ConfigName)
+	return doc, err
+}
+
+func parseLock(data []byte) (*Lock, error) {
 	var doc Lock
-	if unmarshalErr := json.Unmarshal(data, &doc); unmarshalErr != nil {
-		return nil, fmt.Errorf("unmarshal lock: %w", unmarshalErr)
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("unmarshal lock: %w", err)
 	}
 	return &doc, nil
 }

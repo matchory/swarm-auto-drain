@@ -147,6 +147,10 @@ POST /drain
     docker node ls --filter role=manager --format '{{.Hostname}}\t{{.Status.Reachability}}'
     count REACHABLE managers excluding the caller
     if count < floor(N/2) + 1 (where N = total managers) → return 503 with body explaining
+→ if caller holds the lock: record the drain mark on the lock Config's labels
+   (node ID + timestamp; see 2026-10-16-leader-reactivation.md). Failure → 500,
+   nothing drained. Caller not holding the lock → drained unmarked, never
+   reactivated automatically.
 → docker node update --availability drain <caller>
 → poll docker node ps <caller> --filter desired-state=running -q | wc -l until 0 or timeout (default 300s)
    • on drain success: return 200 {"tasks_remaining":0,"elapsed_seconds":N}
@@ -158,6 +162,8 @@ POST /drain
 
 The quorum guard is intentionally placed in the coordinator (single source of truth), not duplicated in the drain shell script.
 
+Draining stops every task on the node, this coordinator's replica included. After `/drain` the caller's local socket is gone until the node is active again; the leader replica reactivates a marked holder after its reboot ([`2026-10-16-leader-reactivation.md`](2026-10-16-leader-reactivation.md)).
+
 ### 3.7 Active
 
 ```
@@ -166,6 +172,8 @@ POST /active
 → docker node update --availability active <caller>
 → return 200
 ```
+
+Not part of the reboot cycle any more: a drained node has no replica to call. After a coordinated reboot the leader sets the node active ([`2026-10-16-leader-reactivation.md`](2026-10-16-leader-reactivation.md)). Kept for operators.
 
 ### 3.8 Worker forwarding logic
 
@@ -243,7 +251,7 @@ The reference consumer is the Matchory `updates::reboot` Puppet module's `tier: 
 
 - `/usr/local/sbin/safe-reboot.sh` — common preamble (kill-switch + recency + reboot-required checks), then calls `drain-docker-swarm`.
 - `/usr/local/sbin/drain-docker-swarm` — POST /lock → POST /drain → touch sentinel → systemctl reboot.
-- `/usr/local/sbin/resume-docker-swarm` — wait for /healthz → POST /active → DELETE /lock → rm sentinel.
+- `/usr/local/sbin/resume-docker-swarm` — wait for /healthz (answers once the leader has set the node active) → best-effort DELETE /lock → rm sentinel. (Before 2026-10-16: POST /active, which cannot work — see [`2026-10-16-leader-reactivation.md`](2026-10-16-leader-reactivation.md).)
 - `/etc/systemd/system/resume-docker-swarm.service` — oneshot, `ConditionPathExists=/var/lib/swarm-auto-drain/draining`.
 
 These scripts are NOT part of this project — they live in the consumer (Matchory Puppet). This project ships only the coordinator and a `docs/consumers/` directory with reference shell scripts other adopters can crib.
@@ -261,7 +269,8 @@ Env vars consumed by the binary:
 | `LOCK_TTL_SECONDS`        | `1800`      | Lock TTL; staler than this is reclaimable.                |
 | `DRAIN_TIMEOUT_SECONDS`   | `300`       | Max time to wait for tasks to leave during drain.         |
 | `ROLE_RECHECK_SECONDS`    | `30`        | How often to re-evaluate manager vs worker role.          |
-| `FORWARD_TIMEOUT_SECONDS` | `60`        | Per-request timeout when worker forwards to manager.      |
+| `FORWARD_TIMEOUT_SECONDS` | `60`        | Per-request timeout when worker forwards to manager. Raised to at least `DRAIN_TIMEOUT_SECONDS` + 30s so a forwarded `/drain` is not cut off. |
+| `REACTIVATE_INTERVAL_SECONDS` | `5`     | Leader's post-reboot reactivation poll interval.          |
 | `MANAGER_DISCOVERY_TTL_SECONDS` | `60`  | How long to cache "which manager replica works."          |
 | `LOG_LEVEL`               | `info`      | `debug` / `info` / `warn` / `error`.                      |
 
@@ -272,6 +281,8 @@ Env vars consumed by the binary:
 - **Coordinator replica dies during a host's drain script:** the host's `curl --max-time 600 POST /drain` returns a connection error; drain script's ERR trap calls `DELETE /lock` (best-effort) and exits non-zero. The host doesn't reboot. Next week's timer retries. Sentinel was not yet written, so resume doesn't fire on subsequent unrelated boots.
 
 - **Coordinator replica dies between sentinel-write and `systemctl reboot`:** the sentinel is now stale. On next boot, resume runs unconditionally because the sentinel is present — but the lock may not be ours (peer might have stolen it as stale during the unplanned outage window). The DELETE /lock handler returns 403 (not holder); resume script logs that and clears the sentinel.
+
+- **Holder rebooted:** the leader replica sets it active and releases the lock once it has seen the node down and Ready again; failure modes of that signal are in [`2026-10-16-leader-reactivation.md`](2026-10-16-leader-reactivation.md) §2.4.
 
 - **Stale lock from a node that genuinely crashed:** after `LOCK_TTL_SECONDS`, the next acquisition attempt by any node performs the steal. Tunable via env var.
 

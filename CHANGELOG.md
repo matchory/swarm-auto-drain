@@ -9,6 +9,43 @@ spelled out under the [Compatibility](#compatibility) section below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nodes now come back into service after a coordinated reboot.** Draining a
+  node stops every task on it, the coordinator's replica included, so after the
+  reboot nothing on the node could undo the drain (and workers have no manager
+  API). The replica on the raft leader now does it: `POST /drain` from the lock
+  holder records a drain mark (node ID, timestamps) as labels on the lock
+  Config; the leader waits until that node has been seen `down`, `disconnected`
+  or raft-`unreachable` and is `ready` again, sets it `active` (only from
+  `drain`) and releases exactly that lock instance. Progress is kept in the
+  labels, so a leader change mid-way continues where it stopped. Manually
+  drained nodes and nodes that never return are never reactivated. See
+  `docs/specs/2026-10-16-leader-reactivation.md`.
+- **A worker's forwarded `/drain` is no longer cut off** by the 60s forward
+  timeout: the forwarder now waits at least `DRAIN_TIMEOUT_SECONDS` + 30s.
+- **The rendered stack sets `stop_grace_period: 330s`** so a node's own replica,
+  stopped by that node's drain, can still return the `/drain` answer.
+
+### Changed
+
+- **`swarm-auto-drain resume` no longer calls `POST /active`.** It recreates the
+  socket directory, waits up to `RESUME_TIMEOUT_SECONDS` (default 900) for the
+  local replica to answer (which happens only once the node is active), makes a
+  best-effort `DELETE /lock`, and clears the sentinel. On timeout it exits 1 and
+  keeps the sentinel. Upgrade the daemon (stack) before the host binary: an old
+  daemon never reactivates the node, so the new resume times out.
+- **`POST /drain`** returns `500` without draining if the caller holds the lock
+  and the drain mark cannot be written. Status codes and bodies are otherwise
+  unchanged; a caller that does not hold the lock is drained unmarked, as before.
+
+### Added
+
+- `REACTIVATE_INTERVAL_SECONDS` (daemon, default 5) and `RESUME_TIMEOUT_SECONDS`
+  (host, default 900).
+- Metric `swarm_auto_drain_reactivate_steps_total{step,outcome}`;
+  `lock_release_total` gains `outcome="reactivated"`.
+
 ## [1.0.0] — 2026-05-28
 
 First stable release. The HTTP contract, env var names, install layout, and the

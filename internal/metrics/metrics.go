@@ -13,12 +13,13 @@ import (
 // Each sub-struct corresponds to a subsystem; domain packages receive
 // only the sub-struct they need so the dependency surface stays narrow.
 type Metrics struct {
-	Lock     LockMetrics
-	Drain    DrainMetrics
-	Role     RoleMetrics
-	Forward  ForwardMetrics
-	Identity IdentityMetrics
-	HTTP     HTTPMetrics
+	Lock       LockMetrics
+	Drain      DrainMetrics
+	Role       RoleMetrics
+	Forward    ForwardMetrics
+	Identity   IdentityMetrics
+	HTTP       HTTPMetrics
+	Reactivate ReactivateMetrics
 }
 
 // LockMetrics covers cluster-mutex outcomes.
@@ -55,6 +56,11 @@ type ForwardMetrics struct {
 // IdentityMetrics covers caller-identity resolution.
 type IdentityMetrics struct {
 	Resolutions metric.Int64Counter // attrs: source, outcome
+}
+
+// ReactivateMetrics covers the leader's post-reboot reactivation loop.
+type ReactivateMetrics struct {
+	Steps metric.Int64Counter // attrs: step (down_seen|activate|release), outcome (ok|noop|error)
 }
 
 // HTTPMetrics covers per-request RED metrics.
@@ -128,6 +134,10 @@ func build(meter metric.Meter) (Metrics, error) {
 	}
 	if m.HTTP.Duration, err = meter.Float64Histogram("swarm_auto_drain.http.duration", metric.WithUnit("s"), metric.WithDescription("HTTP request duration.")); err != nil {
 		return Metrics{}, fmt.Errorf("http.duration: %w", err)
+	}
+
+	if m.Reactivate.Steps, err = meter.Int64Counter("swarm_auto_drain.reactivate.steps", metric.WithDescription("Post-reboot reactivation steps by step and outcome.")); err != nil {
+		return Metrics{}, fmt.Errorf("reactivate.steps: %w", err)
 	}
 
 	return m, nil

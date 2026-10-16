@@ -9,6 +9,12 @@ version: "3.9"
 services:
   {{.ServiceName}}:
     image: {{.ImageRegistry}}/swarm-auto-drain:{{.Version}}
+    # Draining a node stops this replica too (Swarm stops global tasks on
+    # a drained node) while it may still be answering that node's /drain.
+    # Keep it alive for DRAIN_TIMEOUT_SECONDS + 30s, the in-process
+    # shutdown grace, so the answer reaches the host; Docker's 10s default
+    # can kill it mid-request.
+    stop_grace_period: 330s
     deploy:
       mode: global
       restart_policy:

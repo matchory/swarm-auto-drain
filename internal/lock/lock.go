@@ -39,6 +39,10 @@ type Store interface {
 	Acquire(ctx context.Context, holder string, ttl time.Duration) (AcquireResult, error)
 	Release(ctx context.Context, holder string) error
 	Inspect(ctx context.Context) (*Lock, error)
+	// MarkDrained records that the coordinator is draining `holder` (node
+	// `nodeID`) for a reboot, so the leader may reactivate it once it is
+	// back. ErrNoLock / ErrNotHolder when the caller does not hold the lock.
+	MarkDrained(ctx context.Context, holder, nodeID string) error
 }
 
 // sentinelError is a constant-friendly error type for package-level sentinels.

@@ -60,6 +60,19 @@ func TestWithRoleRefresh_TriggersOnNotManager(t *testing.T) {
 			return e
 		},
 		"ConfigRemove": func(c Client) error { return c.ConfigRemove(ctx, "x") },
+		"ConfigMeta": func(c Client) error {
+			_, _, e := c.ConfigMeta(ctx, "x")
+			return e
+		},
+		"ConfigUpdateLabels": func(c Client) error { return c.ConfigUpdateLabels(ctx, "x", 1, nil) },
+		"NodeInspect": func(c Client) error {
+			_, e := c.NodeInspect(ctx, "n")
+			return e
+		},
+		"NodeUpdateAvailabilityIf": func(c Client) error {
+			_, e := c.NodeUpdateAvailabilityIf(ctx, "n", "drain", "active")
+			return e
+		},
 		"NodeList": func(c Client) error {
 			_, e := c.NodeList(ctx, nil)
 			return e

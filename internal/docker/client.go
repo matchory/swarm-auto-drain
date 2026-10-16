@@ -83,11 +83,20 @@ type Client interface {
 	ConfigCreate(ctx context.Context, name string, data []byte, labels map[string]string) (id string, err error)
 	ConfigInspect(ctx context.Context, name string) (data []byte, labels map[string]string, err error)
 	ConfigRemove(ctx context.Context, name string) error
+	// ConfigMeta returns the ID and object version of the named Config.
+	// Paired with ConfigUpdateLabels (optimistic on version) and
+	// ConfigRemove(id) (exact instance) by the leader's reactivation loop.
+	ConfigMeta(ctx context.Context, name string) (id string, version uint64, err error)
+	ConfigUpdateLabels(ctx context.Context, id string, version uint64, labels map[string]string) error
 
 	// Used by the drainer.
 	NodeList(ctx context.Context, fs map[string][]string) ([]NodeSummary, error)
 	NodeUpdate(ctx context.Context, nodeName, availability string) error
 	NodeTaskCount(ctx context.Context, nodeName string) (int, error)
+
+	// Used by the leader's reactivation loop, which addresses nodes by ID.
+	NodeInspect(ctx context.Context, nodeID string) (NodeSummary, error)
+	NodeUpdateAvailabilityIf(ctx context.Context, nodeID, from, to string) (changed bool, err error)
 
 	// Used by identity verification: discover our own service name from the
 	// container's swarm orchestrator labels, and list overlay IPs of running
@@ -115,10 +124,12 @@ type NetworkSummary struct {
 // NodeSummary is a tiny projection of swarm.Node for our needs.
 // Strings grouped first, bool last, to keep the GC pointer-scan window compact.
 type NodeSummary struct {
+	ID           string
 	Hostname     string
 	Role         string // "manager" | "worker".
 	Reachability string // "reachable" | "unreachable" | "unknown" | "".
 	Availability string // "active" | "pause" | "drain".
+	State        string // "ready" | "down" | "disconnected" | "unknown".
 	Leader       bool
 }
 
@@ -194,6 +205,39 @@ func (d *dockerClient) ConfigRemove(ctx context.Context, name string) error {
 	return nil
 }
 
+// ConfigMeta returns the ID and object version of the named swarm Config.
+func (d *dockerClient) ConfigMeta(ctx context.Context, name string) (string, uint64, error) {
+	cfg, _, err := d.c.ConfigInspectWithRaw(ctx, name)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return "", 0, fmt.Errorf("no such config %q: %w", name, err)
+		}
+		return "", 0, fmt.Errorf("config inspect %q: %w", name, err)
+	}
+	return cfg.ID, cfg.Version.Index, nil
+}
+
+// ConfigUpdateLabels replaces the labels of the Config with the given ID.
+// Swarm only allows label changes on a Config; the update is rejected if
+// the object is no longer at `version`.
+func (d *dockerClient) ConfigUpdateLabels(
+	ctx context.Context, id string, version uint64, labels map[string]string,
+) error {
+	cfg, _, err := d.c.ConfigInspectWithRaw(ctx, id)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return fmt.Errorf("no such config %q: %w", id, err)
+		}
+		return fmt.Errorf("config inspect %q: %w", id, err)
+	}
+	spec := cfg.Spec
+	spec.Labels = labels
+	if updateErr := d.c.ConfigUpdate(ctx, id, swarm.Version{Index: version}, spec); updateErr != nil {
+		return fmt.Errorf("config update %q: %w", id, updateErr)
+	}
+	return nil
+}
+
 // NodeList returns a projection of the swarm nodes matching the given filters.
 func (d *dockerClient) NodeList(ctx context.Context, fs map[string][]string) ([]NodeSummary, error) {
 	args := filters.NewArgs()
@@ -208,21 +252,55 @@ func (d *dockerClient) NodeList(ctx context.Context, fs map[string][]string) ([]
 	}
 	out := make([]NodeSummary, 0, len(nodes))
 	for i := range nodes {
-		node := &nodes[i]
-		summary := NodeSummary{
-			Hostname:     node.Description.Hostname,
-			Role:         string(node.Spec.Role),
-			Reachability: "",
-			Availability: string(node.Spec.Availability),
-			Leader:       false,
-		}
-		if node.ManagerStatus != nil {
-			summary.Reachability = string(node.ManagerStatus.Reachability)
-			summary.Leader = node.ManagerStatus.Leader
-		}
-		out = append(out, summary)
+		out = append(out, summarize(&nodes[i]))
 	}
 	return out, nil
+}
+
+// summarize projects a swarm.Node onto NodeSummary.
+func summarize(node *swarm.Node) NodeSummary {
+	summary := NodeSummary{
+		ID:           node.ID,
+		Hostname:     node.Description.Hostname,
+		Role:         string(node.Spec.Role),
+		Reachability: "",
+		Availability: string(node.Spec.Availability),
+		State:        string(node.Status.State),
+		Leader:       false,
+	}
+	if node.ManagerStatus != nil {
+		summary.Reachability = string(node.ManagerStatus.Reachability)
+		summary.Leader = node.ManagerStatus.Leader
+	}
+	return summary
+}
+
+// NodeInspect returns the projection of the node with the given ID.
+func (d *dockerClient) NodeInspect(ctx context.Context, nodeID string) (NodeSummary, error) {
+	node, _, err := d.c.NodeInspectWithRaw(ctx, nodeID)
+	if err != nil {
+		return NodeSummary{}, fmt.Errorf("node inspect %q: %w", nodeID, err)
+	}
+	return summarize(&node), nil
+}
+
+// NodeUpdateAvailabilityIf sets the node's availability to `to` only while
+// it is currently `from`. The update carries the inspected object version,
+// so a concurrent change between inspect and update fails instead of being
+// overwritten. changed is false when the node was not in `from`.
+func (d *dockerClient) NodeUpdateAvailabilityIf(ctx context.Context, nodeID, from, to string) (bool, error) {
+	node, _, err := d.c.NodeInspectWithRaw(ctx, nodeID)
+	if err != nil {
+		return false, fmt.Errorf("node inspect %q: %w", nodeID, err)
+	}
+	if string(node.Spec.Availability) != from {
+		return false, nil
+	}
+	node.Spec.Availability = swarm.NodeAvailability(to)
+	if updateErr := d.c.NodeUpdate(ctx, node.ID, node.Version, node.Spec); updateErr != nil {
+		return false, fmt.Errorf("node update %q: %w", nodeID, updateErr)
+	}
+	return true, nil
 }
 
 // nodeByHostname resolves a node by its exact hostname. The Docker `name`

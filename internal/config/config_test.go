@@ -52,6 +52,7 @@ func TestLoad_Defaults(t *testing.T) {
 		{"RoleRecheck", c.RoleRecheck, 30 * time.Second},
 		{"ForwardTimeout", c.ForwardTimeout, 60 * time.Second},
 		{"ManagerDiscoveryTTL", c.ManagerDiscoveryTTL, 60 * time.Second},
+		{"ReactivateInterval", c.ReactivateInterval, 5 * time.Second},
 	}
 	for _, tc := range durationCases {
 		if tc.got != tc.want {

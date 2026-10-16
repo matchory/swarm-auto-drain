@@ -32,6 +32,7 @@ func TestNoopMetrics_AllInstrumentsPopulated(t *testing.T) {
 		{"Identity.Resolutions", m.Identity.Resolutions != nil},
 		{"HTTP.Requests", m.HTTP.Requests != nil},
 		{"HTTP.Duration", m.HTTP.Duration != nil},
+		{"Reactivate.Steps", m.Reactivate.Steps != nil},
 	}
 	for _, c := range checks {
 		if !c.ok {

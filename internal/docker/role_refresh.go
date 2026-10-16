@@ -88,6 +88,36 @@ func (c *roleAwareClient) ConfigRemove(ctx context.Context, name string) error {
 	return err
 }
 
+// ConfigMeta forwards to the embedded Client and triggers a role refresh on demotion errors.
+func (c *roleAwareClient) ConfigMeta(ctx context.Context, name string) (string, uint64, error) {
+	id, v, err := c.Client.ConfigMeta(ctx, name)
+	c.check(ctx, err)
+	return id, v, err
+}
+
+// ConfigUpdateLabels forwards to the embedded Client and triggers a role refresh on demotion errors.
+func (c *roleAwareClient) ConfigUpdateLabels(
+	ctx context.Context, id string, version uint64, labels map[string]string,
+) error {
+	err := c.Client.ConfigUpdateLabels(ctx, id, version, labels)
+	c.check(ctx, err)
+	return err
+}
+
+// NodeInspect forwards to the embedded Client and triggers a role refresh on demotion errors.
+func (c *roleAwareClient) NodeInspect(ctx context.Context, nodeID string) (NodeSummary, error) {
+	n, err := c.Client.NodeInspect(ctx, nodeID)
+	c.check(ctx, err)
+	return n, err
+}
+
+// NodeUpdateAvailabilityIf forwards to the embedded Client and triggers a role refresh on demotion errors.
+func (c *roleAwareClient) NodeUpdateAvailabilityIf(ctx context.Context, nodeID, from, to string) (bool, error) {
+	changed, err := c.Client.NodeUpdateAvailabilityIf(ctx, nodeID, from, to)
+	c.check(ctx, err)
+	return changed, err
+}
+
 // NodeList forwards to the embedded Client and triggers a role refresh on demotion errors.
 func (c *roleAwareClient) NodeList(ctx context.Context, fs map[string][]string) ([]NodeSummary, error) {
 	out, err := c.Client.NodeList(ctx, fs)

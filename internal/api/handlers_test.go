@@ -17,7 +17,29 @@ import (
 )
 
 type fakeStore struct {
-	state *lock.Lock
+	state   *lock.Lock
+	markErr error
+	// marked records MarkDrained calls that wrote a mark, as holder/nodeID.
+	marked []string
+}
+
+func (f *fakeStore) MarkDrained(_ context.Context, holder, nodeID string) error {
+	if f.markErr != nil {
+		return f.markErr
+	}
+	if f.state == nil {
+		return lock.ErrNoLock
+	}
+	if f.state.Holder != holder {
+		return lock.ErrNotHolder
+	}
+	f.marked = append(f.marked, holder+"/"+nodeID)
+	return nil
+}
+
+// fakeNodeID resolves a hostname to a node ID by prefixing "id-".
+func fakeNodeID(_ context.Context, hostname string) (string, error) {
+	return "id-" + hostname, nil
 }
 
 func (f *fakeStore) Acquire(_ context.Context, holder string, ttl time.Duration) (lock.AcquireResult, error) {
@@ -86,6 +108,7 @@ func newTestServer(t *testing.T, store lock.Store, dr drain.Drainer) *httptest.S
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		NodeID:       fakeNodeID,
 		HTTPMetrics:  metrics.NewNoop().HTTP,
 		DrainMetrics: metrics.NewNoop().Drain,
 	}
@@ -142,6 +165,7 @@ func TestRole_VersionEcho(t *testing.T) {
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		NodeID:       fakeNodeID,
 		Version:      "v0.2.0",
 		HTTPMetrics:  metrics.NewNoop().HTTP,
 		DrainMetrics: metrics.NewNoop().Drain,
@@ -253,6 +277,7 @@ func TestDrain_QuorumFail_RecordsMetric(t *testing.T) {
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		NodeID:       fakeNodeID,
 		HTTPMetrics:  m.HTTP,
 		DrainMetrics: m.Drain,
 	}
@@ -307,6 +332,57 @@ func TestDrain_Error(t *testing.T) {
 	}
 }
 
+func TestDrain_HolderIsMarkedBeforeDrain(t *testing.T) {
+	store := &fakeStore{state: &lock.Lock{Holder: "self-host", AcquiredAt: 1, TTLSeconds: 1800}}
+	dr := &fakeDrainer{quorumOK: true}
+	srv := newTestServer(t, store, dr)
+	defer srv.Close()
+	resp, _ := http.Post(srv.URL+"/drain", "application/json", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if len(store.marked) != 1 || store.marked[0] != "self-host/id-self-host" {
+		t.Errorf("marked = %v, want [self-host/id-self-host]", store.marked)
+	}
+	if dr.gotDrainID != "self-host" {
+		t.Errorf("drained %q", dr.gotDrainID)
+	}
+}
+
+func TestDrain_WithoutLockDrainsUnmarked(t *testing.T) {
+	store := &fakeStore{state: &lock.Lock{Holder: "other-host", AcquiredAt: 1, TTLSeconds: 1800}}
+	dr := &fakeDrainer{quorumOK: true}
+	srv := newTestServer(t, store, dr)
+	defer srv.Close()
+	resp, _ := http.Post(srv.URL+"/drain", "application/json", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if len(store.marked) != 0 {
+		t.Errorf("marked = %v, want none for a non-holder", store.marked)
+	}
+	if dr.gotDrainID != "self-host" {
+		t.Errorf("drained %q, want self-host", dr.gotDrainID)
+	}
+}
+
+func TestDrain_MarkFailureAbortsDrain(t *testing.T) {
+	store := &fakeStore{
+		state:   &lock.Lock{Holder: "self-host", AcquiredAt: 1, TTLSeconds: 1800},
+		markErr: errors.New("update out of sequence"),
+	}
+	dr := &fakeDrainer{quorumOK: true}
+	srv := newTestServer(t, store, dr)
+	defer srv.Close()
+	resp, _ := http.Post(srv.URL+"/drain", "application/json", nil)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	if dr.gotDrainID != "" {
+		t.Errorf("drained %q although the mark could not be written", dr.gotDrainID)
+	}
+}
+
 func TestActive(t *testing.T) {
 	srv := newTestServer(t, &fakeStore{}, &fakeDrainer{quorumOK: true})
 	defer srv.Close()
@@ -347,6 +423,7 @@ func newAuthedRouter(store lock.Store, dr drain.Drainer, resolver identity.NodeR
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		NodeID:       fakeNodeID,
 		HTTPMetrics:  metrics.NewNoop().HTTP,
 		DrainMetrics: metrics.NewNoop().Drain,
 	}
@@ -526,6 +603,7 @@ func TestUnixSocket_HostTrustEndToEnd(t *testing.T) {
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		NodeID:       fakeNodeID,
 		HTTPMetrics:  metrics.NewNoop().HTTP,
 		DrainMetrics: metrics.NewNoop().Drain,
 	}
@@ -590,6 +668,7 @@ func TestUnixSocket_HostTrustOverridesAdversarialHeader(t *testing.T) {
 		DrainTimeout: time.Second,
 		PollInterval: 10 * time.Millisecond,
 		Role:         func() string { return "manager" },
+		NodeID:       fakeNodeID,
 		HTTPMetrics:  metrics.NewNoop().HTTP,
 		DrainMetrics: metrics.NewNoop().Drain,
 	}
