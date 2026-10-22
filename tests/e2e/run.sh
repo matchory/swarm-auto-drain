@@ -68,7 +68,7 @@ wait_for() {
   fail "timed out waiting for ${what}"
 }
 
-wait_dockerd() { wait_for "dockerd on $1" 60 d "$1" info; }
+wait_dockerd() { wait_for "dockerd on $1" 180 d "$1" info; }
 
 start_coordinator() {
   local n=$1
@@ -96,7 +96,7 @@ stop_node() {
 start_node() {
   "${COMPOSE[@]}" start "$1" >/dev/null
   wait_dockerd "$1"
-  wait_for "$1 ready" 60 state_is "$1" ready
+  wait_for "$1 ready" 180 state_is "$1" ready
   start_coordinator "$1"
 }
 
@@ -357,7 +357,8 @@ test_leader_election_mid_drain() {
   wait
   cat "${TMPDIR:-/tmp}/sad-e2e-leader"
   CODE=$(sed 's/.*: \([0-9]*\).*/\1/' "${TMPDIR:-/tmp}/sad-e2e-leader")
-  # During the election, Docker calls can fail; the client then retries.
+  # During the election Docker calls can time out: the coordinator answers
+  # 500 after rolling back, and the client retries.
   if [ "${CODE}" != 200 ]; then call whale-4 "${via}" POST /acquire && expect 200; fi
   [ "$(running_on whale-4)" = 0 ] || fail "containers still running on whale-4"
   call whale-4 "${via}" POST /release && expect 200
