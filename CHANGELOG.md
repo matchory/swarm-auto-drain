@@ -17,6 +17,10 @@ spelled out under the [Compatibility](#compatibility) section below.
   with desired state `running`, which swarm flips to `shutdown` the moment a
   node drains, so `/acquire` returned at once while the node's containers were
   still running. It now counts tasks by their actual state.
+- **A node an operator drained stays drained.** `/acquire` from a node that
+  is `drain` or `pause` without holding a slot now answers 423 and changes
+  nothing. Before, it took a slot, and the `/release` after its reboot set the
+  node active.
 
 ## [2.0.0] — 2026-10-22
 

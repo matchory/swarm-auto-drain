@@ -157,6 +157,26 @@ func TestAcquire_FullIs409AndDrainsNothing(t *testing.T) {
 	}
 }
 
+func TestAcquire_NodeDrainedByAnOperatorIs423AndTakesNoSlot(t *testing.T) {
+	for _, availability := range []string{"drain", "pause"} {
+		st, dr := &fakeSlots{}, &fakeDrainer{quorumOK: true}
+		caller := identity.Caller{Hostname: "whale-4", Availability: availability}
+		code, body := call(t, st, dr, caller, http.MethodPost, "/acquire")
+		if code != http.StatusLocked || st.acquired || dr.drained != "" {
+			t.Fatalf("%s: status = %d, acquired %v, drained %q, body %v", availability, code, st.acquired, dr.drained, body)
+		}
+	}
+}
+
+func TestAcquire_DrainedNodeHoldingItsSlotDrainsAgain(t *testing.T) {
+	st := &fakeSlots{held: map[string]*slots.Slot{"whale-4": {Name: "reboot-slot-1", Holder: "whale-4"}}}
+	dr := &fakeDrainer{quorumOK: true}
+	caller := identity.Caller{Hostname: "whale-4", Availability: "drain"}
+	if code, _ := call(t, st, dr, caller, http.MethodPost, "/acquire"); code != http.StatusOK || dr.drained != "whale-4" {
+		t.Fatalf("status = %d, drained %q", code, dr.drained)
+	}
+}
+
 func TestAcquire_ManagerWithoutQuorumIs503AndTakesNoSlot(t *testing.T) {
 	st, dr := &fakeSlots{}, &fakeDrainer{quorumOK: false}
 	code, _ := call(t, st, dr, manager, http.MethodPost, "/acquire")
