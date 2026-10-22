@@ -25,6 +25,7 @@ func readPeerCredLinux(conn *net.UnixConn) (PeerCred, error) {
 	var ucred *syscall.Ucred
 	var sockoptErr error
 	controlErr := raw.Control(func(fd uintptr) {
+		//nolint:gosec // G115: a file descriptor always fits in int
 		ucred, sockoptErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	})
 	if controlErr != nil {
@@ -34,7 +35,7 @@ func readPeerCredLinux(conn *net.UnixConn) (PeerCred, error) {
 		return PeerCred{}, fmt.Errorf("getsockopt SO_PEERCRED: %w", sockoptErr)
 	}
 	return PeerCred{
-		PID: uint32(ucred.Pid),
+		PID: uint32(ucred.Pid), //nolint:gosec // G115: kernel PIDs are never negative
 		UID: ucred.Uid,
 		GID: ucred.Gid,
 	}, nil

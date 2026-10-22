@@ -4,115 +4,76 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
-  packages: write
+permissions: {}
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [amd64, arm64]
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.25'
-      - name: Build static binary
+          persist-credentials: false
+      # No module/build cache: a published binary must not be built from a
+      # cache another workflow could have written.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build static binaries
         env:
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: '0'
           VERSION: ${{ github.ref_name }}
+          CGO_ENABLED: '0'
         run: |
           mkdir -p dist
-          out=dist/swarm-auto-drain-linux-${{ matrix.arch }}
-          go build \
-            -trimpath \
-            -ldflags="-s -w -X main.version=${VERSION}" \
-            -o "${out}" \
-            ./cmd/swarm-auto-drain
-          sha256sum "${out}" | awk '{print $1}' > "${out}.sha256"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.arch }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 1
+          for arch in amd64 arm64; do
+            out="dist/swarm-auto-drain-linux-${arch}"
+            GOOS=linux GOARCH="${arch}" go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "${out}" \
+              ./cmd/swarm-auto-drain
+          done
+          (cd dist && sha256sum swarm-auto-drain-linux-* > SHA256SUMS)
 
-  docker:
-    needs: [build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: release.Dockerfile
-          sparse-checkout-cone-mode: false
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: binary-*
-          merge-multiple: true
-
-      - name: Stage binaries for buildx
-        # release.Dockerfile expands ${TARGETARCH} to amd64/arm64;
-        # copy the matrix outputs into the layout it expects so the
-        # image ships the exact bits attached to the GitHub release.
-        run: |
-          mkdir -p binaries/linux/amd64 binaries/linux/arm64
-          cp swarm-auto-drain-linux-amd64 binaries/linux/amd64/swarm-auto-drain
-          cp swarm-auto-drain-linux-arm64 binaries/linux/arm64/swarm-auto-drain
-          chmod +x binaries/linux/amd64/swarm-auto-drain binaries/linux/arm64/swarm-auto-drain
-
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/matchory/swarm-auto-drain
-          # `stack` renders `image: ...:vX.Y.Z`, so the leading-`v`
-          # semver tag must exist. Major/minor floats let operators
-          # opt into auto-upgrades within a stable line; `latest`
-          # tracks the newest tag.
-          tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: release.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-  publish:
-    runs-on: ubuntu-latest
-    needs: [build]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: dist
-          merge-multiple: true
-      - name: Stage install.sh
-        run: cp scripts/install.sh dist/install.sh
+          format: spdx-json
+          output-file: dist/swarm-auto-drain.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/swarm-auto-drain-linux-*
+
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/swarm-auto-drain-linux-*
+          sbom-path: dist/swarm-auto-drain.spdx.json
+
+      # The CHANGELOG section for this tag, or a pointer to the file when the
+      # tag has none.
+      - name: Release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          awk -v ver="${TAG#v}" '
+            $0 ~ "^## \\[" ver "\\]" { in_section = 1; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md > "${RUNNER_TEMP}/notes.md"
+          [ -s "${RUNNER_TEMP}/notes.md" ] || echo "See CHANGELOG.md." > "${RUNNER_TEMP}/notes.md"
+
       - name: Create release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --notes "Released by .github/workflows/release.yml. See CHANGELOG/commit log for changes." \
-            dist/*
+          gh release create "${TAG}" --verify-tag --title "${TAG}" \
+            --notes-file "${RUNNER_TEMP}/notes.md" dist/*
