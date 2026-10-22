@@ -78,10 +78,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	shutErr := shutdownAll(ctx, servers, grace)
 	wg.Wait()
-	// Drain any errors that arrived from other listeners while we were
-	// shutting down — operators chasing a startup failure need every
-	// listener's complaint, not just whichever one happened to fire
-	// first into the select.
+	// Collect errors other listeners reported while we were shutting down.
+	// Best-effort: a server that had not reached Serve before the shutdown
+	// returns ErrServerClosed and reports nothing.
 	close(errCh)
 	listenerErrs := []error{firstErr}
 	for err := range errCh {
