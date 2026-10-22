@@ -126,9 +126,6 @@ func buildResource(cfg Config) (*resource.Resource, error) {
 	if cfg.NodeHostname != "" {
 		attrs = append(attrs, semconv.HostName(cfg.NodeHostname))
 	}
-	if cfg.InitialRole != "" {
-		attrs = append(attrs, attribute.String("swarm.role", cfg.InitialRole))
-	}
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes("", attrs...))
 	if err != nil {
 		return nil, fmt.Errorf("merge resource: %w", err)

@@ -18,9 +18,6 @@ type Config struct {
 	ServiceVersion string
 	// NodeHostname populates the host.name resource attr.
 	NodeHostname string
-	// InitialRole populates the swarm.role resource attr (snapshot at
-	// startup; the role can flip later — see spec §3.6).
-	InitialRole string
 	// PushInterval is the cadence for the OTLP PeriodicReader.
 	// Ignored if OTLPEndpoint is empty.
 	PushInterval time.Duration

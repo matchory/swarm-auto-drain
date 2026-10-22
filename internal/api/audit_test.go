@@ -46,38 +46,30 @@ func findAuditRecord(records []map[string]any) map[string]any {
 	return nil
 }
 
-func TestAuditLog_EmitsRecordForLockDrainActive(t *testing.T) {
-	for _, path := range []string{"/lock", "/drain", "/active"} {
+func TestAuditLog_EmitsRecordForAcquireRelease(t *testing.T) {
+	for _, path := range []string{"/acquire", "/release"} {
 		t.Run(path, func(t *testing.T) {
 			handler := AuditLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			r := httptest.NewRequest(http.MethodPost, path, http.NoBody)
-			ctx := identity.WithPeerCred(r.Context(), identity.PeerCred{PID: 4242, UID: 0, GID: 0})
-			r = r.WithContext(ctx)
+			r = r.WithContext(identity.WithCaller(r.Context(), identity.Caller{Hostname: "whale-4"}))
 			w := httptest.NewRecorder()
 			records := captureSlog(t, func() { handler.ServeHTTP(w, r) })
 			rec := findAuditRecord(records)
 			if rec == nil {
 				t.Fatalf("no audit record emitted; got %v", records)
 			}
-			if rec["path"] != path {
-				t.Errorf("record.path = %v, want %s", rec["path"], path)
-			}
-			// Peer_pid arrives via JSON as a float64; compare via float cast.
-			pid, ok := rec["peer_pid"].(float64)
-			if !ok || pid != 4242 {
-				t.Errorf("record.peer_pid = %v, want 4242", rec["peer_pid"])
+			if rec["path"] != path || rec["node"] != "whale-4" || rec["remote"] != r.RemoteAddr {
+				t.Errorf("record = %v", rec)
 			}
 		})
 	}
 }
 
-func TestAuditLog_SkipsHealthzAndRole(t *testing.T) {
-	// /healthz and /role are high-frequency probes. Logging every hit
-	// drowns the audit trail. Skip them entirely at INFO; operators who
-	// want to see them can raise the log level.
-	for _, path := range []string{"/healthz", "/role"} {
+func TestAuditLog_SkipsHealthzAndStatus(t *testing.T) {
+	// Probes would drown the audit trail.
+	for _, path := range []string{"/healthz", "/status"} {
 		t.Run(path, func(t *testing.T) {
 			handler := AuditLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
@@ -92,32 +84,13 @@ func TestAuditLog_SkipsHealthzAndRole(t *testing.T) {
 	}
 }
 
-func TestAuditLog_OmitsPeerPidWhenAbsent(t *testing.T) {
-	// On the overlay TCP path, peer creds are not set. The audit record
-	// still gets emitted, it just lacks peer_pid. Don't fabricate a
-	// zero PID — that would suggest a real process at PID 0.
-	handler := AuditLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	r := httptest.NewRequest(http.MethodPost, "/drain", http.NoBody)
-	w := httptest.NewRecorder()
-	records := captureSlog(t, func() { handler.ServeHTTP(w, r) })
-	rec := findAuditRecord(records)
-	if rec == nil {
-		t.Fatal("no audit record")
-	}
-	if _, present := rec["peer_pid"]; present {
-		t.Errorf("peer_pid present without peer creds in ctx: %v", rec)
-	}
-}
-
 func TestAuditLog_CapturesActualStatusCode(t *testing.T) {
 	// The audit logger records what the handler actually returned, not
 	// what the request asked for. A 503 should show as status=503.
 	handler := AuditLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
-	r := httptest.NewRequest(http.MethodPost, "/drain", http.NoBody)
+	r := httptest.NewRequest(http.MethodPost, "/acquire", http.NoBody)
 	w := httptest.NewRecorder()
 	records := captureSlog(t, func() { handler.ServeHTTP(w, r) })
 	rec := findAuditRecord(records)
@@ -138,7 +111,7 @@ func TestAuditLog_NoExplicitWriteHeaderStillRecords200(t *testing.T) {
 	handler := AuditLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
-	r := httptest.NewRequest(http.MethodPost, "/active", http.NoBody)
+	r := httptest.NewRequest(http.MethodPost, "/release", http.NoBody)
 	w := httptest.NewRecorder()
 	records := captureSlog(t, func() { handler.ServeHTTP(w, r) })
 	rec := findAuditRecord(records)

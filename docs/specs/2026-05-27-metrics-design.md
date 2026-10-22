@@ -1,5 +1,7 @@
 # swarm-auto-drain — Metrics Design Spec
 
+> **Partly superseded by v2:** lock, role and forward instruments are gone; v2 records `swarm_auto_drain.slots.{acquire,release,hold}`.
+
 **Date:** 2026-05-27
 **Status:** Approved for implementation
 **Origin:** Stable-readiness review on branch `implement-coordinator` (2026-05-27). Observability gap identified as a blocker for promoting the project beyond "Pre-alpha".

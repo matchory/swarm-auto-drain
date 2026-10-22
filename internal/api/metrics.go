@@ -17,20 +17,17 @@ import (
 //
 //nolint:gochecknoglobals // immutable lookup table; const-equivalent for maps
 var knownRoutes = map[string]string{
-	"/healthz":         "/healthz",
-	"/role":            "/role",
-	"/managers/health": "/managers/health",
-	"/lock":            "/lock",
-	"/drain":           "/drain",
-	"/active":          "/active",
-	"/metrics":         "/metrics",
+	"/healthz": "/healthz",
+	"/acquire": "/acquire",
+	"/release": "/release",
+	"/status":  "/status",
 }
 
 // Metrics wraps next with RED-style counter and histogram recording.
 // It is installed inside Router (the innermost layer), so the histogram
 // measures handler latency only — the surrounding AuditLog and identity
 // middleware overhead is excluded, and requests rejected by identity
-// (400/503) never reach here and are not counted (identity.resolutions
+// (403/500/503) never reach here and are not counted (identity.resolutions
 // captures those instead).
 func Metrics(next http.Handler, m metrics.HTTPMetrics) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,8 +1,5 @@
-// Package main implements the swarm-auto-drain coordinator binary. The
-// same binary runs in three contexts — as the daemon inside the Swarm
-// service (`run`), as a host-side timer-fired client (`trigger`,
-// `resume`), and as an operator tool (`install`, `uninstall`, `stack`,
-// `version`). Which context applies is decided by os.Args[1].
+// Package main implements the swarm-auto-drain coordinator: a daemon run by
+// systemd on each swarm manager (`run`), plus `version`.
 package main
 
 import (
@@ -12,8 +9,6 @@ import (
 )
 
 // version is overridden at link time via `-ldflags="-X main.version=..."`.
-// It's read by the version subcommand and embedded into the /role HTTP
-// response so host-side clients can detect daemon-vs-host version skew.
 var version = "dev"
 
 // subcommand is the signature every dispatchable command implements.
@@ -26,13 +21,8 @@ type subcommand func(args []string) int
 // a var rather than a const so tests can swap it for fakes — the
 // dispatcher-level tests rely on this. Treat as immutable in production.
 var subcommands = map[string]subcommand{
-	"run":       runCmd,
-	"trigger":   triggerCmd,
-	"resume":    resumeCmd,
-	"install":   installCmd,
-	"uninstall": uninstallCmd,
-	"stack":     stackCmd,
-	"version":   versionCmd,
+	"run":     runCmd,
+	"version": versionCmd,
 }
 
 // minArgsForSubcommand is the argv length below which we treat the
@@ -49,10 +39,7 @@ func main() {
 	os.Exit(dispatch(os.Args))
 }
 
-// dispatch routes argv[1] to the appropriate subcommand. With no
-// subcommand specified, defaults to "run" — preserves the container's
-// existing entrypoint behavior (the Dockerfile sets CMD ["run"] but a
-// hand-invocation of the binary still works).
+// dispatch routes argv[1] to the appropriate subcommand, defaulting to "run".
 func dispatch(args []string) int {
 	if len(args) < minArgsForSubcommand {
 		return subcommands["run"](nil)
@@ -76,11 +63,6 @@ func printUsage(w io.Writer) {
 
 subcommands:
   run        start the coordinator daemon (default if no subcommand given)
-  trigger    host-side: check policy and coordinate a reboot
-  resume     host-side: re-activate after coordinated reboot
-  install    set up systemd units and env file on this host
-  uninstall  remove the systemd units installed by install
-  stack      render the docker-stack YAML to stdout
   version    print version and exit
 
 See docs/specs/ for the full design.

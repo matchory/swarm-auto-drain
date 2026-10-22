@@ -13,21 +13,17 @@ import (
 // Each sub-struct corresponds to a subsystem; domain packages receive
 // only the sub-struct they need so the dependency surface stays narrow.
 type Metrics struct {
-	Lock     LockMetrics
+	Slots    SlotMetrics
 	Drain    DrainMetrics
-	Role     RoleMetrics
-	Forward  ForwardMetrics
 	Identity IdentityMetrics
 	HTTP     HTTPMetrics
 }
 
-// LockMetrics covers cluster-mutex outcomes.
-type LockMetrics struct {
-	Acquire metric.Int64Counter     // attrs: outcome
+// SlotMetrics covers reboot-slot outcomes.
+type SlotMetrics struct {
+	Acquire metric.Int64Counter     // attrs: kind, outcome
 	Release metric.Int64Counter     // attrs: outcome
-	Steals  metric.Int64Counter     // attrs: reason
-	Hold    metric.Float64Histogram // unit: seconds
-	Held    metric.Int64Gauge
+	Hold    metric.Float64Histogram // unit: seconds, acquire to release
 }
 
 // DrainMetrics covers node-drain outcomes and duration.
@@ -36,20 +32,6 @@ type DrainMetrics struct {
 	Duration       metric.Float64Histogram // unit: seconds
 	TasksRemaining metric.Int64Gauge
 	QuorumCheck    metric.Int64Counter // attrs: result
-}
-
-// RoleMetrics covers the role detector's view of swarm role.
-type RoleMetrics struct {
-	Current     metric.Int64Gauge   // 0=worker, 1=manager
-	Refresh     metric.Int64Counter // attrs: trigger, outcome
-	Transitions metric.Int64Counter // attrs: from, to
-}
-
-// ForwardMetrics covers worker→manager proxy behavior.
-type ForwardMetrics struct {
-	Attempts           metric.Int64Counter     // attrs: outcome
-	Duration           metric.Float64Histogram // unit: seconds
-	CacheInvalidations metric.Int64Counter
 }
 
 // IdentityMetrics covers caller-identity resolution.
@@ -65,25 +47,17 @@ type HTTPMetrics struct {
 
 // build wires a Metrics struct from a meter provider. Used by both the
 // production constructor (New) and the test/noop constructors.
-//
-//nolint:gocyclo,cyclop,revive // one branch per instrument; flat is easier to audit than indirection.
 func build(meter metric.Meter) (Metrics, error) {
 	var m Metrics
 	var err error
-	if m.Lock.Acquire, err = meter.Int64Counter("swarm_auto_drain.lock.acquire", metric.WithDescription("Lock acquire attempts by outcome.")); err != nil {
-		return Metrics{}, fmt.Errorf("lock.acquire: %w", err)
+	if m.Slots.Acquire, err = meter.Int64Counter("swarm_auto_drain.slots.acquire", metric.WithDescription("Slot acquire attempts by kind and outcome.")); err != nil {
+		return Metrics{}, fmt.Errorf("slots.acquire: %w", err)
 	}
-	if m.Lock.Release, err = meter.Int64Counter("swarm_auto_drain.lock.release", metric.WithDescription("Lock release attempts by outcome.")); err != nil {
-		return Metrics{}, fmt.Errorf("lock.release: %w", err)
+	if m.Slots.Release, err = meter.Int64Counter("swarm_auto_drain.slots.release", metric.WithDescription("Slot releases by outcome.")); err != nil {
+		return Metrics{}, fmt.Errorf("slots.release: %w", err)
 	}
-	if m.Lock.Steals, err = meter.Int64Counter("swarm_auto_drain.lock.steals", metric.WithDescription("Stale-lock steals by reason.")); err != nil {
-		return Metrics{}, fmt.Errorf("lock.steals: %w", err)
-	}
-	if m.Lock.Hold, err = meter.Float64Histogram("swarm_auto_drain.lock.hold", metric.WithUnit("s"), metric.WithDescription("Lock hold duration in seconds.")); err != nil {
-		return Metrics{}, fmt.Errorf("lock.hold: %w", err)
-	}
-	if m.Lock.Held, err = meter.Int64Gauge("swarm_auto_drain.lock.held", metric.WithDescription("1 if this replica currently holds a lock, 0 otherwise.")); err != nil {
-		return Metrics{}, fmt.Errorf("lock.held: %w", err)
+	if m.Slots.Hold, err = meter.Float64Histogram("swarm_auto_drain.slots.hold", metric.WithUnit("s"), metric.WithDescription("Time a slot was held, acquire to release.")); err != nil {
+		return Metrics{}, fmt.Errorf("slots.hold: %w", err)
 	}
 
 	if m.Drain.Total, err = meter.Int64Counter("swarm_auto_drain.drain.total", metric.WithDescription("Drain attempts by outcome.")); err != nil {
@@ -97,26 +71,6 @@ func build(meter metric.Meter) (Metrics, error) {
 	}
 	if m.Drain.QuorumCheck, err = meter.Int64Counter("swarm_auto_drain.drain.quorum_check", metric.WithDescription("Pre-drain quorum checks by result.")); err != nil {
 		return Metrics{}, fmt.Errorf("drain.quorum_check: %w", err)
-	}
-
-	if m.Role.Current, err = meter.Int64Gauge("swarm_auto_drain.role", metric.WithDescription("Current role: 0=worker, 1=manager.")); err != nil {
-		return Metrics{}, fmt.Errorf("role: %w", err)
-	}
-	if m.Role.Refresh, err = meter.Int64Counter("swarm_auto_drain.role.refresh", metric.WithDescription("Role detector refresh outcomes.")); err != nil {
-		return Metrics{}, fmt.Errorf("role.refresh: %w", err)
-	}
-	if m.Role.Transitions, err = meter.Int64Counter("swarm_auto_drain.role.transitions", metric.WithDescription("Role transitions.")); err != nil {
-		return Metrics{}, fmt.Errorf("role.transitions: %w", err)
-	}
-
-	if m.Forward.Attempts, err = meter.Int64Counter("swarm_auto_drain.forward.attempts", metric.WithDescription("Forward attempts by outcome.")); err != nil {
-		return Metrics{}, fmt.Errorf("forward.attempts: %w", err)
-	}
-	if m.Forward.Duration, err = meter.Float64Histogram("swarm_auto_drain.forward.duration", metric.WithUnit("s"), metric.WithDescription("Forward request duration including retries.")); err != nil {
-		return Metrics{}, fmt.Errorf("forward.duration: %w", err)
-	}
-	if m.Forward.CacheInvalidations, err = meter.Int64Counter("swarm_auto_drain.forward.cache_invalidations", metric.WithDescription("Manager-URL cache invalidations.")); err != nil {
-		return Metrics{}, fmt.Errorf("forward.cache_invalidations: %w", err)
 	}
 
 	if m.Identity.Resolutions, err = meter.Int64Counter("swarm_auto_drain.identity.resolutions", metric.WithDescription("Identity resolutions by source and outcome.")); err != nil {

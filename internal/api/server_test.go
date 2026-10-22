@@ -36,8 +36,6 @@ func shortSocketPath(t *testing.T) string {
 // the listener is serving. The path is always "/" today; kept as a
 // parameter so tests that need a different path can pass one without
 // refactoring the helper.
-//
-//nolint:unparam // path param reserved for future tests
 func dial(t *testing.T, network, addr, path string) (int, string) {
 	t.Helper()
 	client := &http.Client{
@@ -113,50 +111,6 @@ func TestServer_RunsMultipleListenersInParallel(t *testing.T) {
 	}
 }
 
-func TestServer_ConnContextReachesHandler(t *testing.T) {
-	// ConnContext on a ListenerSpec must populate every request's ctx
-	// for that listener. This is the hook the Unix-socket listener uses
-	// to inject peer credentials read from SO_PEERCRED at accept time.
-	type ctxKey struct{}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var seen string
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if v, ok := r.Context().Value(ctxKey{}).(string); ok {
-			seen = v
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-
-	srv := &Server{
-		Listeners: []ListenerSpec{{
-			Name: "tcp", Listener: ln, Handler: handler,
-			ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
-				return context.WithValue(ctx, ctxKey{}, "stamped-by-connctx")
-			},
-		}},
-		ShutdownGrace: time.Second,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- srv.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		<-runDone
-	})
-	time.Sleep(20 * time.Millisecond)
-
-	if status, _ := dial(t, "tcp", ln.Addr().String(), "/"); status != http.StatusOK {
-		t.Fatalf("status = %d", status)
-	}
-	if seen != "stamped-by-connctx" {
-		t.Errorf("handler saw ctx value %q, want stamped-by-connctx", seen)
-	}
-}
-
 func TestServer_NoListenersErrors(t *testing.T) {
 	srv := &Server{}
 	err := srv.Run(context.Background())
@@ -216,11 +170,11 @@ func TestServer_ShutdownDrainsInFlightHandler(t *testing.T) {
 	<-reqDone
 }
 
-func TestServer_BothListenerFailuresReported(t *testing.T) {
-	// Pre-close two listeners. Both Serve calls return net.ErrClosed
-	// concurrently. The buffered errCh holds both; Run must surface
-	// both via errors.Join so operators don't fix the first cause only
-	// to be bitten by the second on the next restart.
+func TestServer_BrokenListenersFailRun(t *testing.T) {
+	// Two pre-closed listeners. Run must fail and name a broken listener.
+	// It cannot promise to name both: once the first failure shuts every
+	// server down, a server that had not reached Serve yet returns
+	// ErrServerClosed without touching its listener.
 	ln1, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -241,11 +195,11 @@ func TestServer_BothListenerFailuresReported(t *testing.T) {
 	}
 	runErr := srv.Run(context.Background())
 	if runErr == nil {
-		t.Fatal("expected error from both broken listeners")
+		t.Fatal("expected error from broken listeners")
 	}
 	msg := runErr.Error()
-	if !strings.Contains(msg, "\"a\"") || !strings.Contains(msg, "\"b\"") {
-		t.Errorf("err = %q, want both listener names mentioned", msg)
+	if !strings.Contains(msg, "\"a\"") && !strings.Contains(msg, "\"b\"") {
+		t.Errorf("err = %q, want a listener name", msg)
 	}
 }
 

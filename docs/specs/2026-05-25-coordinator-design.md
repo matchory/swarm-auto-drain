@@ -1,5 +1,7 @@
 # swarm-auto-drain — Coordinator Design Spec
 
+> **Superseded by** `2026-10-22-v2-host-coordinator-design.md` (v2): deployment, trust model and HTTP contract.
+
 **Date:** 2026-05-25
 **Status:** Approved for implementation
 **Origin:** Extracted from the Matchory Puppet `updates::reboot` Docker Swarm tier discussion.
