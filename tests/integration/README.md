@@ -19,10 +19,7 @@ docker compose -f tests/integration/docker-compose.yml down -v
 
 ## What they do not cover
 
-The coordinator itself. Identity needs a real tailscaled, which the fixture
-does not have; the HTTP contract is covered by the Go unit tests, and the
-binary is tested end to end on a real swarm before it is armed (matchory/platform
-fleet-auto-reboot plan, Task 6 Step 0).
+The coordinator itself: see `tests/e2e/`.
 
 ## CI
 

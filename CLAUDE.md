@@ -24,6 +24,10 @@ GOTOOLCHAIN=go1.25.9 go run github.com/golangci/golangci-lint/v2/cmd/golangci-li
 docker compose -f tests/integration/docker-compose.yml up -d
 bash tests/integration/tests.sh
 docker compose -f tests/integration/docker-compose.yml down -v
+
+# End-to-end: the real binary on a dind swarm with a fake tailscaled LocalAPI
+# (tests/e2e/README.md). No published ports; CI runs it.
+tests/e2e/run.sh
 ```
 
 ## Architecture

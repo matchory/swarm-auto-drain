@@ -94,7 +94,8 @@ func (h Handlers) acquire(w http.ResponseWriter, r *http.Request) {
 		// Not active without a slot of ours: an operator drained or paused
 		// the node. Its /release would set it active again.
 		if c.Availability != "active" {
-			writeJSON(w, http.StatusLocked, map[string]string{"error": "node is " + c.Availability + " by an operator"})
+			msg := "availability is " + c.Availability + ", set by an operator"
+			writeJSON(w, http.StatusLocked, map[string]string{"error": msg})
 			return
 		}
 		if slot = h.takeSlot(w, r, c); slot == nil {
