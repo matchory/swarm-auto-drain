@@ -30,6 +30,9 @@ func (f fakeWhoIs) WhoIs(_ context.Context, addr string) (Peer, error) {
 	return p, nil
 }
 
+// notManager is dockerd's message, verbatim.
+const notManager = "Error response from daemon: This node is not a swarm manager."
+
 var swarmNodes = []Node{
 	{Hostname: "whale-1.example.ts.net", Role: "manager", Availability: "active"},
 	{Hostname: "whale-4.example.ts.net", Role: "worker", Availability: "drain"},
@@ -135,8 +138,7 @@ func TestMiddleware_NotAManagerIs503(t *testing.T) {
 		"100.1.1.4:5000": {Name: "whale-4.example.ts.net.", Tags: []string{"tag:swarm-pipeline"}},
 	}}
 	nodes := func(context.Context) ([]Node, error) {
-		//nolint:revive // dockerd's message, verbatim
-		return nil, errors.New("Error response from daemon: This node is not a swarm manager.")
+		return nil, errors.New(notManager)
 	}
 	if code, _ := serve(t, middleware(who, nodes), "100.1.1.4:5000"); code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", code)
