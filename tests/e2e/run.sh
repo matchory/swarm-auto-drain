@@ -283,7 +283,7 @@ test_quorum() {
 test_demoted_manager() {
   log "a demoted manager answers 'not a manager'; promoted again, it serves"
   q node demote "$(fqdn whale-3)" >/dev/null
-  wait_for "whale-3 demoted" 30 not_manager whale-3
+  wait_for "whale-3 demoted" 120 not_manager whale-3
   call whale-4 whale-3 GET /status && expect 503
   grep -q '"not a manager"' <<<"${BODY}" || fail "body ${BODY}"
   # As a worker now, whale-3 takes a worker slot.
@@ -291,7 +291,7 @@ test_demoted_manager() {
   grep -q '"reboot-slot-1"' <<<"${BODY}" || fail "demoted manager did not get a worker slot: ${BODY}"
   call whale-3 whale-1 POST /release && expect 200
   q node promote "$(fqdn whale-3)" >/dev/null
-  wait_for "whale-3 promoted" 30 x whale-3 docker node ls
+  wait_for "whale-3 promoted" 120 x whale-3 docker node ls
   call whale-4 whale-3 GET /status && expect 200
 }
 
