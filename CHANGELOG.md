@@ -9,7 +9,9 @@ spelled out under the [Compatibility](#compatibility) section below.
 
 ## [Unreleased]
 
-v2.0.0: the coordinator becomes a host service on the managers. Contract:
+## [2.0.0] — 2026-10-22
+
+The coordinator becomes a host service on the managers. Contract:
 `docs/specs/2026-10-22-v2-host-coordinator-design.md`.
 
 ### Changed
@@ -121,5 +123,6 @@ Not covered by semver: internal Go package layout under `internal/`, log
 message wording, metric attribute values that aren't part of the metric's
 documented identity, and the contents of `docs/plans/` (historical artifacts).
 
-[Unreleased]: https://github.com/matchory/swarm-auto-drain/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/matchory/swarm-auto-drain/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/matchory/swarm-auto-drain/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/matchory/swarm-auto-drain/releases/tag/v1.0.0
