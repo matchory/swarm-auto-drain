@@ -9,6 +9,14 @@ spelled out under the [Compatibility](#compatibility) section below.
 
 ## [Unreleased]
 
+### Changed
+
+- Releases publish static linux/amd64 and linux/arm64 binaries with
+  `SHA256SUMS`, an SPDX SBOM, and build-provenance and SBOM attestations
+  (`gh attestation verify <file> --owner matchory`). No container image or
+  `install.sh` is published any more; v2 runs the coordinator as a host
+  service on the managers.
+
 ## [1.0.0] — 2026-05-28
 
 First stable release. The HTTP contract, env var names, install layout, and the

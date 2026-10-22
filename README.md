@@ -2,6 +2,12 @@
 
 **Kured-style safe automated reboots for Docker Swarm.**
 
+> **v2 in progress.** The coordinator moves from a global swarm service to a
+> host service on the managers, reached over the tailnet. Releases ship static
+> binaries with a SHA-256 file, an SBOM and build-provenance attestations; no
+> container image or `install.sh` is published. The Quickstart below describes
+> v1 and goes away with v2.
+
 A small Go daemon that coordinates rolling node reboots in a Docker Swarm cluster. Deployed as one global service, it ensures at most one node drains and reboots at a time and refuses to drain a manager that would break raft quorum.
 
 This works similar to [kured](https://kured.dev) in Kubernetes.
