@@ -66,8 +66,10 @@ node is not (or no longer) a swarm manager; the caller tries the next one.
 
 ### `POST /acquire`
 
-Take a slot for the caller, then drain its node and wait until no task
-remains.
+Take a slot for the caller, then drain its node and wait until every task on
+it has reached a terminal *actual* state (complete, shutdown, failed,
+rejected, remove, orphaned). Desired state says nothing here: the drain sets
+it to shutdown at once, while the containers are still running.
 
 | Status | Meaning |
 |---|---|

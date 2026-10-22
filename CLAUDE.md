@@ -51,8 +51,8 @@ TCP on LISTEN_ADDR (the manager's tailnet IP)
   `<prefix>-manager`. `ConfigCreate` failing on an existing name is the CAS.
   No expiry, by design: a node that never returns keeps its slot.
 - **Drain** (`internal/drain`): quorum guard (`floor(M/2)+1` *other* managers
-  reachable), set `drain`, poll until no running task. `/acquire` rolls back
-  (active + free slot) on timeout or error.
+  reachable), set `drain`, poll until every task on the node is in a terminal
+  *actual* state. `/acquire` rolls back (active + free slot) on timeout or error.
 - **Not a manager**: any Docker call failing with "not a swarm manager"
   becomes `503 {"error":"not a manager"}`, so callers try the next manager.
 
