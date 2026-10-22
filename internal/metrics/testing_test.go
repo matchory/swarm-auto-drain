@@ -12,13 +12,13 @@ import (
 
 func TestManualHarness_RecordsAndFinds(t *testing.T) {
 	reader, m := metrics.NewManualHarness(t)
-	m.Lock.Acquire.Add(
+	m.Slots.Acquire.Add(
 		context.Background(),
 		1,
 		metric.WithAttributes(attribute.String("outcome", "acquired")),
 	)
 
-	points := metrics.FindCounter(t, reader, "swarm_auto_drain.lock.acquire")
+	points := metrics.FindCounter(t, reader, "swarm_auto_drain.slots.acquire")
 	if len(points) == 0 {
 		t.Fatal("expected at least one data point")
 	}

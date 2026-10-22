@@ -9,13 +9,42 @@ spelled out under the [Compatibility](#compatibility) section below.
 
 ## [Unreleased]
 
+v2.0.0: the coordinator becomes a host service on the managers. Contract:
+`docs/specs/2026-10-22-v2-host-coordinator-design.md`.
+
 ### Changed
 
+- **Runs under systemd on every manager**, outside the swarm, listening on the
+  manager's tailnet address (`LISTEN_ADDR`, required, one address). v1's
+  global service drained its own replica along with the node, so nothing could
+  reactivate the node after the reboot.
+- **Identity from the tailnet:** tailscaled's WhoIs names the peer; it must
+  carry one of `ALLOWED_TAGS` and be a node of the swarm.
+- **Reboot slots replace the lock:** `WORKER_SLOTS` worker slots and one
+  manager slot, as Docker Configs `<SLOT_PREFIX>-N` / `-manager`. Slots never
+  expire.
+- **API:** `POST /acquire` (slot + drain), `POST /release` (active + free),
+  `GET /status`, `GET /healthz`.
+- **Metrics:** `swarm_auto_drain.slots.{acquire,release,hold}` replace the
+  lock instruments; identity resolutions are counted by outcome only.
 - Releases publish static linux/amd64 and linux/arm64 binaries with
   `SHA256SUMS`, an SPDX SBOM, and build-provenance and SBOM attestations
   (`gh attestation verify <file> --owner matchory`). No container image or
   `install.sh` is published any more; v2 runs the coordinator as a host
   service on the managers.
+
+### Removed
+
+- The global-service mode, worker → manager forwarding, the overlay
+  encryption check, the role detector, the Unix socket and SO_PEERCRED trust.
+- The TTL lock and stale steal, `/lock`, `/drain`, `/active`, `/role`,
+  `/managers/health`.
+- The `trigger`, `resume`, `install`, `uninstall` and `stack` subcommands and
+  the daemon-side policy (windows, blackout file, kill switch): the caller
+  owns its host scripts.
+- `NODE_HOSTNAME`, `LOCK_TTL_SECONDS`, `LOCK_CONFIG_NAME`,
+  `ROLE_RECHECK_SECONDS`, `FORWARD_TIMEOUT_SECONDS`,
+  `MANAGER_DISCOVERY_TTL_SECONDS`, `UNIX_SOCKET_*`, `ALLOW_UNENCRYPTED_OVERLAY`.
 
 ## [1.0.0] — 2026-05-28
 
@@ -79,15 +108,14 @@ First stable release. The HTTP contract, env var names, install layout, and the
 Starting with v1.0.0, the following surfaces follow semver:
 
 - **HTTP contract** — paths, methods, status codes, and JSON shapes documented
-  in `docs/specs/2026-05-25-coordinator-design.md`. Breaking changes bump the
-  major version.
+  in the current spec (`docs/specs/2026-10-22-v2-host-coordinator-design.md`
+  from v2). Breaking changes bump the major version.
 - **Env var names and semantics** documented in the README's Configuration
   table. New vars may be added in minor releases with safe defaults; removals
   or semantic changes bump the major version.
-- **Subcommand surface** (`stack`, `install`, `trigger`) and their flags.
-- **On-disk layout** written by `install`: `/usr/local/sbin/swarm-auto-drain`,
-  `/etc/default/swarm-auto-drain`, the three systemd units, the
-  `swarm-coord` group, and the Unix-socket directory.
+- **Subcommand surface** (`run`, `version` from v2) and their flags.
+- **Slot Config names and data** (from v2), since operators read and remove
+  them by hand.
 
 Not covered by semver: internal Go package layout under `internal/`, log
 message wording, metric attribute values that aren't part of the metric's

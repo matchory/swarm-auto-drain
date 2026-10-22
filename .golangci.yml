@@ -57,8 +57,7 @@ linters:
     # immutable lookup maps, and sentinel errors are legitimate; the
     # //nolint:gochecknoglobals churn dominates the signal.
     - gochecknoglobals
-    # Named returns are a documented readability tool here (see e.g.
-    # identity.Middleware.resolve's named (id, source, status, err)).
+    # Named returns are a documented readability tool here.
     - nonamedreturns
 
   settings:

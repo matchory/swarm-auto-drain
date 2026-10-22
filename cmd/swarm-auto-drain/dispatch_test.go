@@ -79,7 +79,7 @@ func TestDispatch_VersionSubcommand(t *testing.T) {
 }
 
 func TestDispatch_PassesTrailingArgsToSubcommand(t *testing.T) {
-	// E.g. `swarm-auto-drain install --gid 9999` — the dispatcher peels
+	// E.g. `swarm-auto-drain run --foo bar` — the dispatcher peels
 	// the binary name and subcommand off, hands the rest to the subcommand.
 	calls, restore := installFakes(t)
 	defer restore()

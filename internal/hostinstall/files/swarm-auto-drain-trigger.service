@@ -1,9 +1,0 @@
-[Unit]
-Description=swarm-auto-drain reboot trigger
-After=docker.service network-online.target
-Wants=docker.service network-online.target
-
-[Service]
-Type=oneshot
-EnvironmentFile=/etc/default/swarm-auto-drain
-ExecStart=/usr/local/sbin/swarm-auto-drain trigger

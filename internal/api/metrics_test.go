@@ -16,7 +16,7 @@ func TestMetricsMiddleware_KnownRouteCounted(t *testing.T) {
 	})
 	h := api.Metrics(inner, m.HTTP)
 
-	req := httptest.NewRequest(http.MethodPost, "/lock", http.NoBody)
+	req := httptest.NewRequest(http.MethodPost, "/acquire", http.NoBody)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -24,7 +24,7 @@ func TestMetricsMiddleware_KnownRouteCounted(t *testing.T) {
 		t.Fatalf("status passthrough broken: %d", w.Code)
 	}
 	points := metrics.FindCounter(t, reader, "swarm_auto_drain.http.requests")
-	dp := metrics.PointWithAttrs(t, points, "method", "POST", "route", "/lock", "status", "201")
+	dp := metrics.PointWithAttrs(t, points, "method", "POST", "route", "/acquire", "status", "201")
 	if dp.Value != 1 {
 		t.Errorf("expected count 1, got %d", dp.Value)
 	}
@@ -49,7 +49,7 @@ func TestMetricsMiddleware_DurationObserved(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	h := api.Metrics(inner, m.HTTP)
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/role", http.NoBody))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", http.NoBody))
 
 	count := metrics.FindHistogramCount(t, reader, "swarm_auto_drain.http.duration")
 	if count == 0 {

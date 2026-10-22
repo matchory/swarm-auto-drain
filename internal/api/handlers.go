@@ -1,5 +1,6 @@
-// Package api wires the HTTP API onto the lock store, drainer, and
-// caller-identity middleware.
+// Package api serves the coordinator's HTTP API: reboot slots, drain and
+// reactivation for the calling node. The contract is
+// docs/specs/2026-10-22-v2-host-coordinator-design.md.
 package api
 
 import (
@@ -8,179 +9,237 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
 
+	dockerpkg "github.com/matchory/swarm-auto-drain/internal/docker"
 	"github.com/matchory/swarm-auto-drain/internal/drain"
 	"github.com/matchory/swarm-auto-drain/internal/identity"
-	"github.com/matchory/swarm-auto-drain/internal/lock"
 	"github.com/matchory/swarm-auto-drain/internal/metrics"
+	"github.com/matchory/swarm-auto-drain/internal/slots"
 )
+
+// SlotStore is what the handlers need from slots.Store.
+type SlotStore interface {
+	Acquire(ctx context.Context, holder string, kind slots.Kind) (*slots.Slot, []string, error)
+	Release(ctx context.Context, holder string) (bool, error)
+	HeldBy(ctx context.Context, holder string) (*slots.Slot, error)
+}
 
 // Handlers wires the HTTP handlers onto their collaborators.
 // Field order puts pointer/interface fields first to shrink the GC scan window.
 type Handlers struct {
-	Store   lock.Store
-	Drainer drain.Drainer
-	Role    func() string
-	// Version is the daemon binary's version string, surfaced in /role so
-	// host-side clients can detect daemon-vs-host skew. Empty when unset.
-	Version      string
+	Slots        SlotStore
+	Drainer      drain.Drainer
 	HTTPMetrics  metrics.HTTPMetrics
 	DrainMetrics metrics.DrainMetrics
-	LockTTL      time.Duration
 	DrainTimeout time.Duration
 	PollInterval time.Duration
+	// inFlight holds the nodes with an /acquire or /release running here.
+	// Set by Router.
+	inFlight *sync.Map
 }
 
-// Router returns an http.Handler mux that dispatches the coordinator's HTTP API.
+const (
+	// drainGrace lets a drain run to its own timeout instead of being cut
+	// off by the request context.
+	drainGrace = 30 * time.Second
+	// rollbackTimeout bounds a rollback, which runs even after the caller
+	// has gone.
+	rollbackTimeout = 30 * time.Second
+)
+
+// Router returns the API mux.
 func (h Handlers) Router() http.Handler {
+	served := h
+	if served.inFlight == nil {
+		served.inFlight = &sync.Map{}
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", h.healthz)
-	mux.HandleFunc("/role", h.role)
-	mux.HandleFunc("/managers/health", h.managersHealth)
-	mux.HandleFunc("/lock", h.lock)
-	mux.HandleFunc("/drain", h.drain)
-	mux.HandleFunc("/active", h.active)
+	mux.HandleFunc("/healthz", healthz)
+	mux.HandleFunc("/acquire", served.acquire)
+	mux.HandleFunc("/release", served.release)
+	mux.HandleFunc("/status", served.status)
 	return Metrics(mux, h.HTTPMetrics)
 }
 
-func (Handlers) healthz(w http.ResponseWriter, _ *http.Request) {
+func healthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
 
-func (h Handlers) role(w http.ResponseWriter, r *http.Request) {
-	// Per spec §3.2: {"role":"manager"|"worker","leader":"<hostname>"}.
-	// Leader is looked up via the Drainer; on transient failure (e.g. lost
-	// docker socket) we still return role with leader empty rather than 500.
-	leader := ""
-	if m, err := h.Drainer.Managers(r.Context()); err == nil {
-		leader = m.Leader
-	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"role":    h.Role(),
-		"leader":  leader,
-		"version": h.Version,
-	})
-}
-
-func (h Handlers) managersHealth(w http.ResponseWriter, r *http.Request) {
-	m, err := h.Drainer.Managers(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-func (h Handlers) lock(w http.ResponseWriter, r *http.Request) {
-	id := identity.FromContext(r.Context())
-	switch r.Method {
-	case http.MethodPost:
-		h.lockAcquire(w, r, id)
-	case http.MethodDelete:
-		h.lockRelease(w, r, id)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (h Handlers) lockAcquire(w http.ResponseWriter, r *http.Request, id string) {
-	res, err := h.Store.Acquire(r.Context(), id, h.LockTTL)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	switch res.Status {
-	case lock.Acquired:
-		writeJSON(w, http.StatusCreated, lockBody(res.Current))
-	case lock.AcquiredViaSteal:
-		writeJSON(w, http.StatusGone, lockBody(res.Current))
-	case lock.HeldByOther:
-		writeJSON(w, http.StatusConflict, lockBody(res.Current))
-	default:
-		http.Error(w, "unknown acquire status", http.StatusInternalServerError)
-	}
-}
-
-func (h Handlers) lockRelease(w http.ResponseWriter, r *http.Request, id string) {
-	err := h.Store.Release(r.Context(), id)
-	switch {
-	case err == nil:
-		w.WriteHeader(http.StatusNoContent)
-	case errors.Is(err, lock.ErrNotHolder):
-		http.Error(w, "not holder", http.StatusForbidden)
-	case errors.Is(err, lock.ErrNoLock):
-		http.Error(w, "no lock", http.StatusNotFound)
-	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-// lockBody normalises a nil *lock.Lock to an empty JSON object. Current may be
-// nil for HeldByOther in a race where the winning peer's lock vanished before
-// we could re-inspect; this keeps the response well-formed.
-func lockBody(current *lock.Lock) any {
-	if current == nil {
-		return map[string]any{}
-	}
-	return current
-}
-
-func (h Handlers) drain(w http.ResponseWriter, r *http.Request) {
+func (h Handlers) acquire(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id := identity.FromContext(r.Context())
-
-	ok, rep, err := h.Drainer.QuorumOK(r.Context(), id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	ctx := r.Context()
+	c := identity.FromContext(ctx)
+	done, ok := h.claim(c.Hostname)
 	if !ok {
-		h.DrainMetrics.Total.Add(r.Context(), 1, otelmetric.WithAttributes(attribute.String("outcome", "quorum_fail")))
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"error":  "manager quorum would be lost",
-			"report": rep,
-		})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": errInProgress.Error()})
 		return
 	}
+	defer done()
 
-	ctx, cancel := context.WithTimeout(r.Context(), h.DrainTimeout+30*time.Second)
-	defer cancel()
-	res, err := h.Drainer.Drain(ctx, id, h.DrainTimeout, h.PollInterval)
+	slot, err := h.Slots.HeldBy(ctx, c.Hostname)
 	if err != nil {
-		slog.Error("drain failed", "node", id, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		fail(w, err)
+		return
+	}
+	if slot == nil {
+		if slot = h.takeSlot(w, r, c); slot == nil {
+			return
+		}
+	}
+
+	drainCtx, cancel := context.WithTimeout(ctx, h.DrainTimeout+drainGrace)
+	defer cancel()
+	res, err := h.Drainer.Drain(drainCtx, c.Hostname, h.DrainTimeout, h.PollInterval)
+	if err != nil {
+		slog.Error("drain failed, rolling back", "node", c.Hostname, "err", err)
+		h.rollback(ctx, c.Hostname)
+		fail(w, err)
 		return
 	}
 	body := map[string]any{
+		"slot":            slot,
 		"tasks_remaining": res.TasksRemaining,
 		"elapsed_seconds": int(res.Elapsed.Seconds()),
 	}
 	if res.TimedOut {
+		slog.Warn("drain timed out, rolling back", "node", c.Hostname, "tasks_remaining", res.TasksRemaining)
+		h.rollback(ctx, c.Hostname)
+		delete(body, "slot")
 		writeJSON(w, http.StatusRequestTimeout, body)
 		return
 	}
 	writeJSON(w, http.StatusOK, body)
 }
 
-func (h Handlers) active(w http.ResponseWriter, r *http.Request) {
+// takeSlot checks quorum for a manager, then takes a slot of the caller's
+// kind. On nil it has already written the response.
+func (h Handlers) takeSlot(w http.ResponseWriter, r *http.Request, c identity.Caller) *slots.Slot {
+	ctx := r.Context()
+	kind := slots.Worker
+	if c.Manager {
+		kind = slots.Manager
+		ok, rep, err := h.Drainer.QuorumOK(ctx, c.Hostname)
+		if err != nil {
+			fail(w, err)
+			return nil
+		}
+		if !ok {
+			h.DrainMetrics.Total.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("outcome", "quorum_fail")))
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "manager quorum would be lost", "report": rep})
+			return nil
+		}
+	}
+	slot, holders, err := h.Slots.Acquire(ctx, c.Hostname, kind)
+	if err != nil {
+		fail(w, err)
+		return nil
+	}
+	if slot == nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "no free slot", "holders": holders})
+	}
+	return slot
+}
+
+// claim marks node as having a request in flight here, so overlapping
+// requests from one node cannot both drain it or race a rollback. False
+// means one is already running.
+func (h Handlers) claim(node string) (release func(), ok bool) {
+	if _, loaded := h.inFlight.LoadOrStore(node, struct{}{}); loaded {
+		return nil, false
+	}
+	return func() { h.inFlight.Delete(node) }, true
+}
+
+// rollback sets node active and frees its slot after a failed drain.
+// Best-effort: failures are logged, the drain failure is what the caller
+// sees. It does not use the request's context, which is canceled when the
+// caller gives up: that is when a rollback is needed most.
+func (h Handlers) rollback(reqCtx context.Context, node string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(reqCtx), rollbackTimeout)
+	defer cancel()
+	if err := h.Drainer.Activate(ctx, node); err != nil {
+		slog.Error("rollback: activate failed; slot kept", "node", node, "err", err)
+		return
+	}
+	if _, err := h.Slots.Release(ctx, node); err != nil {
+		slog.Error("rollback: release failed", "node", node, "err", err)
+	}
+}
+
+func (h Handlers) release(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id := identity.FromContext(r.Context())
-	if err := h.Drainer.Activate(r.Context(), id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	ctx := r.Context()
+	c := identity.FromContext(ctx)
+	done, ok := h.claim(c.Hostname)
+	if !ok {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": errInProgress.Error()})
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	defer done()
+
+	slot, err := h.Slots.HeldBy(ctx, c.Hostname)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	// No slot: an operator may have drained this node by hand; leave it.
+	if slot == nil {
+		writeJSON(w, http.StatusOK, map[string]bool{"released": false})
+		return
+	}
+	// Active before freeing the slot, so a failed activation keeps the slot
+	// and no further node drains while this one carries nothing.
+	if err = h.Drainer.Activate(ctx, c.Hostname); err != nil {
+		fail(w, err)
+		return
+	}
+	if _, err = h.Slots.Release(ctx, c.Hostname); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"released": true})
+}
+
+func (h Handlers) status(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	c := identity.FromContext(r.Context())
+	slot, err := h.Slots.HeldBy(r.Context(), c.Hostname)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node": c.Hostname, "availability": c.Availability, "slot": slot})
+}
+
+var (
+	// errNotManager tells the caller to try the next manager.
+	errNotManager = errors.New("not a manager")
+	// errInProgress: this node already has a request running here.
+	errInProgress = errors.New("a request for this node is in progress")
+)
+
+// fail answers 503 when this node is not a swarm manager, 500 otherwise.
+func fail(w http.ResponseWriter, err error) {
+	if dockerpkg.IsNotManager(err) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": errNotManager.Error()})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -22,7 +22,7 @@ func TestNew_NoReadersConfigured_ReturnsNoop(t *testing.T) {
 	if shutdown != nil {
 		t.Error("shutdown should be nil when no readers configured")
 	}
-	if m.Lock.Acquire == nil {
+	if m.Slots.Acquire == nil {
 		t.Error("Metrics still must be populated (noop-backed)")
 	}
 }
@@ -32,7 +32,6 @@ func TestNew_PromListener_ReturnsHandler(t *testing.T) {
 		ListenAddr:     ":0", // not actually bound here; just a non-empty marker
 		ServiceVersion: "v0-test",
 		NodeHostname:   "node-a",
-		InitialRole:    "manager",
 	}
 	m, handler, shutdown, err := metrics.New(context.Background(), cfg)
 	if err != nil {
@@ -44,7 +43,7 @@ func TestNew_PromListener_ReturnsHandler(t *testing.T) {
 	if shutdown == nil {
 		t.Fatal("shutdown must be non-nil when any reader is attached")
 	}
-	if m.Lock.Acquire == nil {
+	if m.Slots.Acquire == nil {
 		t.Fatal("Metrics must be populated")
 	}
 

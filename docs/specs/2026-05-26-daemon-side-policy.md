@@ -1,5 +1,7 @@
 # Daemon-side enforcement of cluster reboot policy
 
+> **Superseded by** `2026-10-22-v2-host-coordinator-design.md` (v2): the coordinator no longer applies any reboot policy.
+
 **Date:** 2026-05-26
 **Status:** Draft — to be expanded
 **Origin:** Discussion in [`docs/plans/2026-05-26-subcommand-host-binary.md`](../plans/2026-05-26-subcommand-host-binary.md), §4 locked decisions ("Daemon-side enforcement…" row).

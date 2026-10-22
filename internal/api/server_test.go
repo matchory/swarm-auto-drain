@@ -36,8 +36,6 @@ func shortSocketPath(t *testing.T) string {
 // the listener is serving. The path is always "/" today; kept as a
 // parameter so tests that need a different path can pass one without
 // refactoring the helper.
-//
-//nolint:unparam // path param reserved for future tests
 func dial(t *testing.T, network, addr, path string) (int, string) {
 	t.Helper()
 	client := &http.Client{
@@ -110,50 +108,6 @@ func TestServer_RunsMultipleListenersInParallel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancel")
-	}
-}
-
-func TestServer_ConnContextReachesHandler(t *testing.T) {
-	// ConnContext on a ListenerSpec must populate every request's ctx
-	// for that listener. This is the hook the Unix-socket listener uses
-	// to inject peer credentials read from SO_PEERCRED at accept time.
-	type ctxKey struct{}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var seen string
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if v, ok := r.Context().Value(ctxKey{}).(string); ok {
-			seen = v
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-
-	srv := &Server{
-		Listeners: []ListenerSpec{{
-			Name: "tcp", Listener: ln, Handler: handler,
-			ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
-				return context.WithValue(ctx, ctxKey{}, "stamped-by-connctx")
-			},
-		}},
-		ShutdownGrace: time.Second,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- srv.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		<-runDone
-	})
-	time.Sleep(20 * time.Millisecond)
-
-	if status, _ := dial(t, "tcp", ln.Addr().String(), "/"); status != http.StatusOK {
-		t.Fatalf("status = %d", status)
-	}
-	if seen != "stamped-by-connctx" {
-		t.Errorf("handler saw ctx value %q, want stamped-by-connctx", seen)
 	}
 }
 

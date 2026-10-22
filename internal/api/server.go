@@ -13,11 +13,8 @@ import (
 // errNoListeners signals an API misuse: Server.Run with no ListenerSpec.
 var errNoListeners = errors.New("api.Server: no listeners configured")
 
-// Server runs one http.Server per configured listener, all sharing the
-// same ShutdownGrace. Different listeners typically pair with different
-// handlers — e.g. a TCP listener on the overlay network using the
-// IP-derived identity middleware, and a Unix socket listener using
-// HostTrust where filesystem permissions are the access boundary.
+// Server runs one http.Server per configured listener (the API, and the
+// metrics listener when enabled), all sharing the same ShutdownGrace.
 // Field order puts pointer/slice fields up front to shrink the GC pointer-scan window.
 type Server struct {
 	Listeners     []ListenerSpec
@@ -26,21 +23,13 @@ type Server struct {
 
 // ListenerSpec pairs a pre-bound net.Listener with the handler that
 // should serve traffic accepted on it. The Name is used in log lines and
-// error messages only — pick something operators will recognize
-// ("overlay-tcp", "host-unix-socket").
-//
-// ConnContext, if non-nil, is set on the listener's underlying
-// http.Server. It's invoked once per accepted connection BEFORE the
-// request handler runs, so it's the right hook for stamping properties
-// of the connection (e.g. peer credentials from SO_PEERCRED on a Unix
-// socket) into the request context.
+// error messages only.
 //
 // Field order puts pointer/interface fields first.
 type ListenerSpec struct {
-	Listener    net.Listener
-	Handler     http.Handler
-	ConnContext func(ctx context.Context, c net.Conn) context.Context
-	Name        string
+	Listener net.Listener
+	Handler  http.Handler
+	Name     string
 }
 
 const (
@@ -69,7 +58,6 @@ func (s *Server) Run(ctx context.Context) error {
 		srv := &http.Server{
 			Handler:           spec.Handler,
 			ReadHeaderTimeout: readHeaderTimeout,
-			ConnContext:       spec.ConnContext,
 		}
 		servers[i] = srv
 		name, l := spec.Name, spec.Listener
