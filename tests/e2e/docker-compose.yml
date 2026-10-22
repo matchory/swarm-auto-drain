@@ -1,0 +1,81 @@
+# e2e harness: a 3-manager + 2-worker swarm in dind, the real coordinator
+# binary on each manager, tailscaled replaced by fakelocalapi (peers.json maps
+# source IPs to tailnet peers), and three callers that are not swarm nodes.
+# No published ports. Driven by run.sh.
+name: sad-e2e
+
+x-node: &node
+  build: .
+  image: sad-e2e-node
+  privileged: true
+  environment:
+    DOCKER_TLS_CERTDIR: ""
+  volumes:
+    - ./bin:/e2e/bin:ro
+    - ./peers.json:/e2e/peers.json:ro
+
+services:
+  whale-1:
+    <<: *node
+    hostname: whale-1.e2e.ts.net
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.11
+
+  whale-2:
+    <<: *node
+    hostname: whale-2.e2e.ts.net
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.12
+
+  whale-3:
+    <<: *node
+    hostname: whale-3.e2e.ts.net
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.13
+
+  whale-4:
+    <<: *node
+    hostname: whale-4.e2e.ts.net
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.14
+
+  whale-5:
+    <<: *node
+    hostname: whale-5.e2e.ts.net
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.15
+
+  other-cluster:
+    build: .
+    image: sad-e2e-node
+    entrypoint: ["sleep", "infinity"]
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.20
+
+  untagged:
+    build: .
+    image: sad-e2e-node
+    entrypoint: ["sleep", "infinity"]
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.21
+
+  intruder:
+    build: .
+    image: sad-e2e-node
+    entrypoint: ["sleep", "infinity"]
+    networks:
+      e2e:
+        ipv4_address: 10.98.0.22
+
+networks:
+  e2e:
+    ipam:
+      config:
+        - subnet: 10.98.0.0/24

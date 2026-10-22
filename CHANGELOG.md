@@ -9,6 +9,19 @@ spelled out under the [Compatibility](#compatibility) section below.
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-10-22
+
+### Fixed
+
+- **`/acquire` waits for the containers to stop.** The drain poll counted tasks
+  with desired state `running`, which swarm flips to `shutdown` the moment a
+  node drains, so `/acquire` returned at once while the node's containers were
+  still running. It now counts tasks by their actual state.
+- **A node an operator drained stays drained.** `/acquire` from a node that
+  is `drain` or `pause` without holding a slot now answers 423 and changes
+  nothing. Before, it took a slot, and the `/release` after its reboot set the
+  node active.
+
 ## [2.0.0] — 2026-10-22
 
 The coordinator becomes a host service on the managers. Contract:
@@ -123,6 +136,7 @@ Not covered by semver: internal Go package layout under `internal/`, log
 message wording, metric attribute values that aren't part of the metric's
 documented identity, and the contents of `docs/plans/` (historical artifacts).
 
-[Unreleased]: https://github.com/matchory/swarm-auto-drain/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/matchory/swarm-auto-drain/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/matchory/swarm-auto-drain/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/matchory/swarm-auto-drain/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/matchory/swarm-auto-drain/releases/tag/v1.0.0

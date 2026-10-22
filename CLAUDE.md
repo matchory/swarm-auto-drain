@@ -24,6 +24,10 @@ GOTOOLCHAIN=go1.25.9 go run github.com/golangci/golangci-lint/v2/cmd/golangci-li
 docker compose -f tests/integration/docker-compose.yml up -d
 bash tests/integration/tests.sh
 docker compose -f tests/integration/docker-compose.yml down -v
+
+# End-to-end: the real binary on a dind swarm with a fake tailscaled LocalAPI
+# (tests/e2e/README.md). No published ports; CI runs it.
+tests/e2e/run.sh
 ```
 
 ## Architecture
@@ -51,8 +55,8 @@ TCP on LISTEN_ADDR (the manager's tailnet IP)
   `<prefix>-manager`. `ConfigCreate` failing on an existing name is the CAS.
   No expiry, by design: a node that never returns keeps its slot.
 - **Drain** (`internal/drain`): quorum guard (`floor(M/2)+1` *other* managers
-  reachable), set `drain`, poll until no running task. `/acquire` rolls back
-  (active + free slot) on timeout or error.
+  reachable), set `drain`, poll until every task on the node is in a terminal
+  *actual* state. `/acquire` rolls back (active + free slot) on timeout or error.
 - **Not a manager**: any Docker call failing with "not a swarm manager"
   becomes `503 {"error":"not a manager"}`, so callers try the next manager.
 

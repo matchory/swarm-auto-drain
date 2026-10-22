@@ -209,7 +209,10 @@ func (d *dockerClient) NodeUpdate(ctx context.Context, nodeName, availability st
 	return fmt.Errorf("node update %q: %w", nodeName, err)
 }
 
-// NodeTaskCount returns the number of running tasks scheduled on the named node.
+// NodeTaskCount returns the number of tasks on the named node whose actual
+// state is not terminal, i.e. whose container may still be running. Desired
+// state is no use here: a drain sets it to shutdown at once, long before the
+// containers stop.
 func (d *dockerClient) NodeTaskCount(ctx context.Context, nodeName string) (int, error) {
 	// Resolve to the exact node ID first: the task `node` filter, like the
 	// node `name` filter, matches by name OR ID with substring semantics, so
@@ -219,13 +222,25 @@ func (d *dockerClient) NodeTaskCount(ctx context.Context, nodeName string) (int,
 	if err != nil {
 		return 0, err
 	}
-	args := filters.NewArgs(
-		filters.Arg("node", node.ID),
-		filters.Arg("desired-state", "running"),
-	)
-	tasks, err := d.c.TaskList(ctx, types.TaskListOptions{Filters: args})
+	tasks, err := d.c.TaskList(ctx, types.TaskListOptions{Filters: filters.NewArgs(filters.Arg("node", node.ID))})
 	if err != nil {
 		return 0, fmt.Errorf("task list %q: %w", nodeName, err)
 	}
-	return len(tasks), nil
+	count := 0
+	for i := range tasks {
+		if !terminalTaskStates[tasks[i].Status.State] {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// terminalTaskStates are the actual task states with no container left.
+var terminalTaskStates = map[swarm.TaskState]bool{
+	swarm.TaskStateComplete: true,
+	swarm.TaskStateShutdown: true,
+	swarm.TaskStateFailed:   true,
+	swarm.TaskStateRejected: true,
+	swarm.TaskStateRemove:   true,
+	swarm.TaskStateOrphaned: true,
 }

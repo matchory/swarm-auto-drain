@@ -1,0 +1,10 @@
+{
+  "10.98.0.11": {"Name": "whale-1.e2e.ts.net.", "ComputedName": "whale-1", "Tags": ["tag:swarm-e2e"]},
+  "10.98.0.12": {"Name": "whale-2.e2e.ts.net.", "ComputedName": "whale-2", "Tags": ["tag:swarm-e2e"]},
+  "10.98.0.13": {"Name": "whale-3.e2e.ts.net.", "ComputedName": "whale-3", "Tags": ["tag:swarm-e2e"]},
+  "10.98.0.14": {"Name": "whale-4.e2e.ts.net.", "ComputedName": "whale-4", "Tags": ["tag:swarm-e2e"]},
+  "10.98.0.15": {"Name": "whale-5.e2e.ts.net.", "ComputedName": "whale-5", "Tags": ["tag:swarm-e2e"]},
+  "10.98.0.20": {"Name": "whale-1.other.ts.net.", "ComputedName": "whale-1", "Tags": ["tag:swarm-other"]},
+  "10.98.0.21": {"Name": "laptop.e2e.ts.net.", "ComputedName": "laptop", "Tags": []},
+  "10.98.0.22": {"Name": "intruder.e2e.ts.net.", "ComputedName": "intruder", "Tags": ["tag:swarm-e2e"]}
+}

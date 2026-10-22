@@ -66,13 +66,16 @@ node is not (or no longer) a swarm manager; the caller tries the next one.
 
 ### `POST /acquire`
 
-Take a slot for the caller, then drain its node and wait until no task
-remains.
+Take a slot for the caller, then drain its node and wait until every task on
+it has reached a terminal *actual* state (complete, shutdown, failed,
+rejected, remove, orphaned). Desired state says nothing here: the drain sets
+it to shutdown at once, while the containers are still running.
 
 | Status | Meaning |
 |---|---|
 | 200 | Drained; the caller holds a slot. Body `{"slot","tasks_remaining":0,"elapsed_seconds"}`. Calling again while holding a slot drains again and returns 200. |
 | 409 | No free slot of the caller's kind, body `{"error","holders":[…]}`. Or this node already has an `/acquire` or `/release` running on this manager. |
+| 423 | The caller holds no slot and is not `active`: an operator drained or paused it. Nothing changes; its `/release` would otherwise set it active. Body `{"error"}`. |
 | 503 | A manager caller would break quorum (`floor(M/2)+1` other managers must be reachable). Body `{"error","report"}`. Or: not a manager. |
 | 408 | Tasks still running after `DRAIN_TIMEOUT_SECONDS`. The coordinator has set the node active again and freed the slot. |
 | 500 | Docker error. The coordinator has tried to set the node active and free the slot. |
