@@ -8,8 +8,7 @@ run:
 linters:
   default: all
   disable:
-    # Need project-specific config; enable later with a real allowlist.
-    - depguard
+    # Needs project-specific config; enable later with a real allowlist.
     - gomodguard
     # Not applicable to this codebase.
     - ginkgolinter
@@ -62,6 +61,20 @@ linters:
     - nonamedreturns
 
   settings:
+    depguard:
+      rules:
+        # Avoids import cycles: a package that needs Docker declares the
+        # minimal interface it uses (see internal/lock, internal/drain);
+        # cmd/ wires the real client in.
+        consumer-interfaces:
+          files:
+            - "**/internal/**/*.go"
+            - "!**/internal/docker/**"
+            - "!**/internal/stackgen/**"
+          deny:
+            - pkg: github.com/matchory/swarm-auto-drain/internal/docker
+              desc: declare the minimal Docker interface in the consuming package instead
+
     errcheck:
       check-type-assertions: true
       # check-blank intentionally off: `_ = foo()` already documents intent;
